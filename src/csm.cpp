@@ -1,7 +1,7 @@
 #include "csm.h"
 #include <render_device.h>
 #include <gtc/matrix_transform.hpp>
-#include <Macros.h>
+#include <macros.h>
 
 CSM::CSM()
 {
@@ -15,23 +15,7 @@ CSM::CSM()
 
 CSM::~CSM()
 {
-	for (int i = 0; i < 8; i++)
-	{
-		if (m_shadow_fbos[i])
-			m_device->destroy(m_shadow_fbos[i]);
-	}
-
-	m_device->destroy(m_shadow_maps);
-}
-
-FrustumSplit* CSM::frustum_splits()
-{
-	return &m_splits[0];
-}
-
-glm::mat4 CSM::split_view_proj(int i)
-{
-	return m_crop_matrices[i];
+	
 }
 
 void CSM::initialize(RenderDevice* device, float lambda, float near_offset, int split_count, int shadow_map_size, dw::Camera* camera, int _width, int _height, glm::vec3 dir)
@@ -90,8 +74,24 @@ void CSM::initialize(RenderDevice* device, float lambda, float near_offset, int 
 		m_splits[i].fov = camera_fov / 57.2957795 + 0.2f;
 		m_splits[i].ratio = ratio;
 	}
+    
+    m_bias = glm::mat4(0.5f, 0.0f, 0.0f, 0.0f,
+                       0.0f, 0.5f, 0.0f, 0.0f,
+                       0.0f, 0.0f, 0.5f, 0.0f,
+                       0.5f, 0.5f, 0.5f, 1.0f);
 
 	update(camera, dir);
+}
+
+void CSM::shutdown()
+{
+	for (int i = 0; i < 8; i++)
+	{
+		if (m_shadow_fbos[i])
+			m_device->destroy(m_shadow_fbos[i]);
+	}
+
+	m_device->destroy(m_shadow_maps);
 }
 
 void CSM::update(dw::Camera* camera, glm::vec3 dir)
@@ -110,6 +110,8 @@ void CSM::update(dw::Camera* camera, glm::vec3 dir)
 	update_splits(camera);
 	update_frustum_corners(camera);
 	update_crop_matrices(modelview);
+    update_texture_matrices(camera);
+    update_far_bounds(camera);
 }
 
 void CSM::update_splits(dw::Camera* camera)
@@ -170,6 +172,29 @@ void CSM::update_frustum_corners(dw::Camera* camera)
 		t_frustum.corners[6] = fc + up * far_height + right * far_width; // far-top-right
 		t_frustum.corners[7] = fc - up * far_height + right * far_width; // far-bottom-right
 	}
+}
+
+void CSM::update_texture_matrices(dw::Camera* camera)
+{
+    for (int i = 0; i < m_split_count; i++)
+        m_texture_matrices[i] = m_bias * m_crop_matrices[i];
+}
+
+void CSM::update_far_bounds(dw::Camera* camera)
+{
+    // for every active split
+    for(int i = 0 ; i < m_split_count ; i++)
+    {
+        // f[i].fard is originally in eye space - tell's us how far we can see.
+        // Here we compute it in camera homogeneous coordinates. Basically, we calculate
+        // cam_proj * (0, 0, f[i].fard, 1)^t and then normalize to [0; 1]
+        
+        FrustumSplit& split = m_splits[i];
+		glm::vec4 pos = camera->m_projection * glm::vec4(0.0f, 0.0f, -split.far_plane, 1.0f);
+		glm::vec4 ndc = pos / pos.w;
+
+        m_far_bounds[i] = ndc.z * 0.5f + 0.5f;
+    }
 }
 
 void CSM::update_crop_matrices(glm::mat4 t_modelview)
