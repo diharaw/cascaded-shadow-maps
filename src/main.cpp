@@ -135,8 +135,10 @@ vec3 debug_color(float frag_depth)
 		return vec3(1.0, 0.0, 0.0);
 	else if (index == 1)
 		return vec3(0.0, 1.0, 0.0);
-	else
+	else if (index == 2)
 		return vec3(0.0, 0.0, 1.0);
+	else
+		return vec3(1.0, 1.0, 0.0);
 }
 
 void main()
@@ -152,8 +154,8 @@ void main()
 	float frag_depth = (PS_IN_NDCFragPos.z / PS_IN_NDCFragPos.w) * 0.5 + 0.5;
 	float shadow = shadow_occlussion(frag_depth, n, l);
 	
-	//vec3 color = debug_color(frag_depth);
-	vec3 color = (1.0 - shadow) * diffuse * lambert + ambient;
+	vec3 cascade = debug_color(frag_depth);
+	vec3 color = (1.0 - shadow) * diffuse * lambert + ambient + cascade * 0.5;
 
     PS_OUT_Color = vec4(color, 1.0);
 }
@@ -340,7 +342,7 @@ private:
 		m_csm_uniforms.direction = glm::vec4(glm::vec3(1.0f, -1.0f, 0.0f), 0.0f);
 		m_csm_uniforms.direction = glm::normalize(m_csm_uniforms.direction);
 
-		m_csm.initialize(&m_device, 0.75f, 100.0f, 4, 1024, m_main_camera, m_width, m_height, m_csm_uniforms.direction);
+		m_csm.initialize(&m_device, 0.75f, 100.0f, 4, 2048, m_main_camera, m_width, m_height, m_csm_uniforms.direction);
 	}
 
 	// -----------------------------------------------------------------------------------------------------------------------------------
