@@ -25,13 +25,20 @@ void CSM::initialize(RenderDevice* device, float lambda, float near_offset, int 
 	m_near_offset = near_offset;
 	m_split_count = split_count;
 	m_shadow_map_size = shadow_map_size;
-
-	m_device->destroy(m_shadow_maps);
+    
+    if (m_shadow_maps)
+    {
+        m_device->destroy(m_shadow_maps);
+        m_shadow_maps = nullptr;
+    }
 
 	for (int i = 0; i < 8; i++)
 	{
 		if (m_shadow_fbos[i])
-			m_device->destroy(m_shadow_fbos[i]);
+        {
+            m_device->destroy(m_shadow_fbos[i]);
+            m_shadow_fbos[i] = nullptr;
+        }
 	}
 
 	Texture2DArrayCreateDesc desc;

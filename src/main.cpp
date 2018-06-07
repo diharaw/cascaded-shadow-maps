@@ -82,6 +82,7 @@ in vec2 PS_IN_TexCoord;
 layout (std140) uniform CSMUniforms //#binding 2
 {
     vec4 direction;
+    vec4 options;
     int num_cascades;
     float far_bounds[8];
     mat4 texture_matrices[8];
@@ -90,19 +91,29 @@ layout (std140) uniform CSMUniforms //#binding 2
 uniform sampler2D s_Diffuse; //#slot 0
 uniform sampler2DArray s_ShadowMap; //#slot 1
 
+float depth_compare(float a, float b, float bias)
+{
+    return a - bias > b ? 1.0 : 0.0;
+}
+
 float shadow_occlussion(float frag_depth, vec3 n, vec3 l)
 {
 	int index = num_cascades - 1;
-
+    float blend = 0.0;
+    
 	// Find shadow cascade.
 	for (int i = 0; i < num_cascades; i++)
 	{
 		if (frag_depth < far_bounds[i])
 		{
 			index = i;
+            blend = clamp( (frag_depth - far_bounds[i] * 0.995) * 50.0, 0.0, 1.0);
 			break;
 		}
 	}
+    
+    // Apply blend options.
+    blend *= options.z;
 
 	// Transform frag position into Light-space.
 	vec4 light_space_pos = texture_matrices[index] * vec4(PS_IN_WorldFragPos, 1.0f);
@@ -110,11 +121,26 @@ float shadow_occlussion(float frag_depth, vec3 n, vec3 l)
 	float shadow_map_depth = texture(s_ShadowMap, vec3(light_space_pos.xy, float(index))).r;
 	float current_depth = light_space_pos.z;
 
-	float bias = max(0.05 * (1.0 - dot(n, l)), 0.005);  
+	float bias = max(0.0005 * (1.0 - dot(n, l)), 0.0005);  
 	
-	float shadow = current_depth - bias > shadow_map_depth ? 1.0 : 0.0;
-
-	return shadow;
+    float shadow = depth_compare(current_depth, shadow_map_depth, bias);
+    
+    if (options.x == 1.0)
+    {
+        if (blend > 0.0 && index != num_cascades - 1)
+        {
+            light_space_pos = texture_matrices[index + 1] * vec4(PS_IN_WorldFragPos, 1.0f);
+            shadow_map_depth = texture(s_ShadowMap, vec3(light_space_pos.xy, float(index + 1))).r;
+            current_depth = light_space_pos.z;
+            float next_shadow = depth_compare(current_depth, shadow_map_depth, bias);
+            
+            return (1.0 - blend) * shadow + blend * next_shadow;
+        }
+        else
+            return shadow;
+    }
+    else
+        return 0.0;
 }
 
 vec3 debug_color(float frag_depth)
@@ -148,13 +174,13 @@ void main()
 
 	float lambert = max(0.0f, dot(n, l));
 
-	vec3 diffuse = texture(s_Diffuse, PS_IN_TexCoord * 50).xyz;
-	vec3 ambient = diffuse * 0.03;
+	vec3 diffuse = vec3(0.7);// texture(s_Diffuse, PS_IN_TexCoord * 50).xyz;
+	vec3 ambient = diffuse * 0.3;
 
 	float frag_depth = (PS_IN_NDCFragPos.z / PS_IN_NDCFragPos.w) * 0.5 + 0.5;
 	float shadow = shadow_occlussion(frag_depth, n, l);
 	
-	vec3 cascade = debug_color(frag_depth);
+    vec3 cascade = options.y == 1.0 ? debug_color(frag_depth) : vec3(0.0);
 	vec3 color = (1.0 - shadow) * diffuse * lambert + ambient + cascade * 0.5;
 
     PS_OUT_Color = vec4(color, 1.0);
@@ -194,10 +220,13 @@ struct FarBound
 struct CSMUniforms
 {
     DW_ALIGNED(16) glm::vec4 direction;
+    DW_ALIGNED(16) glm::vec4 options; // x: shadows enabled, y: show cascades, z: blend enabled
     DW_ALIGNED(16) int       num_cascades;
     DW_ALIGNED(16) FarBound  far_bounds[8];
     DW_ALIGNED(16) glm::mat4 texture_matrices[8];
 };
+
+#define CAMERA_FAR_PLANE 1000.0f
 
 class Sample : public dw::Application
 {
@@ -234,12 +263,15 @@ protected:
 
 	void update(double delta) override
 	{
+        // Debug GUI
+        debug_gui();
+        
 		// Update camera.
         update_camera();
         
         // Update CSM.
         m_csm.update(m_main_camera, m_csm_uniforms.direction);
-
+    
 		// Update transforms.
         update_transforms(m_debug_mode ? m_debug_camera : m_main_camera);
 
@@ -287,7 +319,7 @@ protected:
 	void window_resized(int width, int height) override
 	{
 		// Override window resized method to update camera projection.
-		m_main_camera->update_projection(60.0f, 0.1f, 100.0f, float(m_width) / float(m_height));
+		m_main_camera->update_projection(60.0f, 0.1f, CAMERA_FAR_PLANE, float(m_width) / float(m_height));
 
 		// Re-initialize CSM to fit new frustum shape.
 		initialize_csm();
@@ -339,10 +371,13 @@ private:
     
 	void initialize_csm()
 	{
-		m_csm_uniforms.direction = glm::vec4(glm::vec3(1.0f, -1.0f, 0.0f), 0.0f);
+		m_csm_uniforms.direction = glm::vec4(glm::vec3(-1.0f, -1.0f, -1.0f), 0.0f);
 		m_csm_uniforms.direction = glm::normalize(m_csm_uniforms.direction);
+        m_csm_uniforms.options.x = 1;
+        m_csm_uniforms.options.y = 0;
+        m_csm_uniforms.options.z = 1;
 
-		m_csm.initialize(&m_device, 0.75f, 100.0f, 4, 2048, m_main_camera, m_width, m_height, m_csm_uniforms.direction);
+		m_csm.initialize(&m_device, 0.75f, 100.0f, 3, 1024, m_main_camera, m_width, m_height, m_csm_uniforms.direction);
 	}
 
 	// -----------------------------------------------------------------------------------------------------------------------------------
@@ -435,8 +470,8 @@ private:
 		m_sampler = m_device.create_sampler_state(ss_desc);
 
 		// Sampler state for Shadow map.
-		ss_desc.min_filter = TextureFilteringMode::LINEAR;
-		ss_desc.mag_filter = TextureFilteringMode::LINEAR;
+		ss_desc.min_filter = TextureFilteringMode::NEAREST;
+		ss_desc.mag_filter = TextureFilteringMode::NEAREST;
 		ss_desc.max_anisotropy = 0;
 		ss_desc.wrap_mode_u = TextureWrapMode::CLAMP_TO_EDGE;
 		ss_desc.wrap_mode_v = TextureWrapMode::CLAMP_TO_EDGE;
@@ -479,7 +514,7 @@ private:
 	bool load_mesh()
 	{
 		m_plane = dw::Mesh::load("plane.obj", &m_device);
-        m_suzanne = dw::Mesh::load("suzanne.obj", &m_device);
+        m_suzanne = dw::Mesh::load("village_house_obj.obj", &m_device);
 		return m_plane != nullptr && m_suzanne != nullptr;
 	}
 
@@ -487,7 +522,7 @@ private:
 
 	void create_camera()
 	{
-		m_main_camera = new dw::Camera(60.0f, 0.1f, 100.0f, float(m_width) / float(m_height), glm::vec3(0.0f, 5.0f, 20.0f), glm::vec3(0.0f, 0.0, -1.0f));
+		m_main_camera = new dw::Camera(60.0f, 0.1f, CAMERA_FAR_PLANE, float(m_width) / float(m_height), glm::vec3(0.0f, 5.0f, 20.0f), glm::vec3(0.0f, 0.0, -1.0f));
         m_debug_camera = new dw::Camera(60.0f, 0.1f, 1000.0f, float(m_width) / float(m_height), glm::vec3(0.0f, 5.0f, 20.0f), glm::vec3(0.0f, 0.0, -1.0f));
 	}
 
@@ -557,8 +592,8 @@ private:
         m_device.bind_uniform_buffer(m_csm_ubo, ShaderType::FRAGMENT, 2);
         
         // Draw meshes.
-        render_mesh(m_plane, m_plane_transforms);
-        render_mesh(m_suzanne, m_suzanne_transforms);
+        //render_mesh(m_plane, m_plane_transforms);
+        render_mesh(m_suzanne, m_suzanne_transforms, false);
     }
     
     // -----------------------------------------------------------------------------------------------------------------------------------
@@ -586,10 +621,10 @@ private:
             m_device.clear_framebuffer(ClearTarget::ALL, m_clear_color);
             
             // Draw meshes. Disable textures because we don't need them here.
-			m_device.bind_rasterizer_state(m_rs);
-            render_mesh(m_plane, m_plane_transforms, false);
+			//m_device.bind_rasterizer_state(m_rs);
+           // render_mesh(m_plane, m_plane_transforms, false);
 
-			m_device.bind_rasterizer_state(m_rs);
+			m_device.bind_rasterizer_state(m_shadow_map_rs);
             render_mesh(m_suzanne, m_suzanne_transforms, false);
         }
     }
@@ -645,7 +680,7 @@ private:
         m_suzanne_transforms.model = glm::mat4(1.0f);
         m_suzanne_transforms.model = glm::translate(m_suzanne_transforms.model, glm::vec3(0.0f, 3.0f, 0.0f));
        // m_suzanne_transforms.model = glm::rotate(m_suzanne_transforms.model, (float)glfwGetTime(), glm::vec3(0.0f, 1.0f, 0.0f));
-        m_suzanne_transforms.model = glm::scale(m_suzanne_transforms.model, glm::vec3(2.0f));
+        m_suzanne_transforms.model = glm::scale(m_suzanne_transforms.model, glm::vec3(0.2f));
     }
 
     // -----------------------------------------------------------------------------------------------------------------------------------
@@ -681,10 +716,58 @@ private:
     }
     
     // -----------------------------------------------------------------------------------------------------------------------------------
+    
+    void debug_gui()
+    {
+        if (ImGui::Begin("Cascaded Shadow Maps"))
+        {
+            bool shadows = m_csm_uniforms.options.x;
+            ImGui::Checkbox("Enable Shadows", &shadows);
+            m_csm_uniforms.options.x = shadows;
+            
+            bool debug = m_csm_uniforms.options.y;
+            ImGui::Checkbox("Show Debug Cascades", &debug);
+            m_csm_uniforms.options.y = debug;
+            
+            bool blend = m_csm_uniforms.options.z;
+            ImGui::Checkbox("Blending", &blend);
+            m_csm_uniforms.options.z = blend;
+
+			ImGui::Checkbox("Stable", &m_csm.m_stable_pssm);
+            
+            ImGui::SliderFloat("Lambda", &m_csm.m_lambda, 0, 1);
+            
+            int split_count = m_csm.m_split_count;
+            ImGui::SliderInt("Frustum Splits", &split_count, 1, 4);
+            
+            if (split_count != m_csm.m_split_count)
+                m_csm.initialize(&m_device, m_csm.m_lambda, m_csm.m_near_offset, split_count, m_csm.m_shadow_map_size, m_main_camera, m_width, m_height, glm::vec3(m_csm_uniforms.direction));
+            
+            static const char* items[] = { "256", "512", "1024", "2048" };
+            static const int shadow_map_sizes[] = { 256, 512, 1024, 2048 };
+            static int item_current = 2;
+            ImGui::Combo("Shadow Map Size", &item_current, items, IM_ARRAYSIZE(items));
+            
+            if (shadow_map_sizes[item_current] != m_csm.m_shadow_map_size)
+                m_csm.initialize(&m_device, m_csm.m_lambda, m_csm.m_near_offset, m_csm.m_split_count, shadow_map_sizes[item_current], m_main_camera, m_width, m_height, glm::vec3(m_csm_uniforms.direction));
+            
+            static int current_view = 0;
+            ImGui::RadioButton("Scene", &current_view, 0);
+            
+            for (int i = 0; i < m_csm.m_split_count; i++)
+            {
+                std::string name = "Cascade " + std::to_string(i + 1);
+                ImGui::RadioButton(name.c_str(), &current_view, i + 1);
+            }
+        }
+        ImGui::End();
+    }
+    
+    // -----------------------------------------------------------------------------------------------------------------------------------
 
 private:
 	// Clear color.
-	float m_clear_color[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+	float m_clear_color[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
 
 	// General GPU resources.
 	Shader* m_vs;

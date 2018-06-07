@@ -19,11 +19,9 @@ struct FrustumSplit
 	glm::vec3 corners[8];
 };
 
-class CSM
+struct CSM
 {
-private:
-	//Texture2D* m_shadow_maps;
-	Texture2D* m_shadow_maps;
+	Texture2D* m_shadow_maps = nullptr;
 	Framebuffer* m_shadow_fbos[MAX_FRUSTUM_SPLITS];
 	float m_lambda;
 	float m_near_offset;
@@ -37,8 +35,6 @@ private:
 	glm::mat4 m_crop_matrices[MAX_FRUSTUM_SPLITS]; // crop * proj * view
 	glm::mat4 m_proj_matrices[MAX_FRUSTUM_SPLITS]; // crop * proj * light_view * inv_view
     glm::mat4 m_texture_matrices[MAX_FRUSTUM_SPLITS];
-
-public:
 	bool m_stable_pssm = true;
 
 	CSM();
