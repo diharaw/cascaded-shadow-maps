@@ -120,7 +120,7 @@ float shadow_occlussion(float frag_depth, vec3 n, vec3 l)
 
 	float shadow_map_depth = texture(s_ShadowMap, vec3(light_space_pos.xy, float(index))).r;
 	float current_depth = light_space_pos.z;
-
+    
 	float bias = max(0.0005 * (1.0 - dot(n, l)), 0.0005);  
 	
     float shadow = depth_compare(current_depth, shadow_map_depth, bias);
@@ -275,11 +275,17 @@ protected:
 		// Update transforms.
         update_transforms(m_debug_mode ? m_debug_camera : m_main_camera);
 
+        // Render debug view.
+        render_debug_view();
+        
         // Render shadow map.
         render_shadow_map();
         
         // Render scene.
         render_scene();
+        
+        // Render debug draw.
+        m_debug_draw.render(nullptr, m_width, m_height, m_debug_mode ? m_debug_camera->m_view_projection : m_main_camera->m_view_projection);
 	}
 
 	// -----------------------------------------------------------------------------------------------------------------------------------
@@ -320,6 +326,7 @@ protected:
 	{
 		// Override window resized method to update camera projection.
 		m_main_camera->update_projection(60.0f, 0.1f, CAMERA_FAR_PLANE, float(m_width) / float(m_height));
+        m_debug_camera->update_projection(60.0f, 0.1f, CAMERA_FAR_PLANE * 2.0f, float(m_width) / float(m_height));
 
 		// Re-initialize CSM to fit new frustum shape.
 		initialize_csm();
@@ -377,7 +384,7 @@ private:
         m_csm_uniforms.options.y = 0;
         m_csm_uniforms.options.z = 1;
 
-		m_csm.initialize(&m_device, 0.75f, 100.0f, 3, 1024, m_main_camera, m_width, m_height, m_csm_uniforms.direction);
+		m_csm.initialize(&m_device, 0.75f, CAMERA_FAR_PLANE, 3, 1024, m_main_camera, m_width, m_height, m_csm_uniforms.direction);
 	}
 
 	// -----------------------------------------------------------------------------------------------------------------------------------
@@ -523,7 +530,7 @@ private:
 	void create_camera()
 	{
 		m_main_camera = new dw::Camera(60.0f, 0.1f, CAMERA_FAR_PLANE, float(m_width) / float(m_height), glm::vec3(0.0f, 5.0f, 20.0f), glm::vec3(0.0f, 0.0, -1.0f));
-        m_debug_camera = new dw::Camera(60.0f, 0.1f, 1000.0f, float(m_width) / float(m_height), glm::vec3(0.0f, 5.0f, 20.0f), glm::vec3(0.0f, 0.0, -1.0f));
+        m_debug_camera = new dw::Camera(60.0f, 0.1f, CAMERA_FAR_PLANE * 2.0f, float(m_width) / float(m_height), glm::vec3(0.0f, 5.0f, 20.0f), glm::vec3(0.0f, 0.0, -1.0f));
 	}
 
 	// -----------------------------------------------------------------------------------------------------------------------------------
@@ -734,6 +741,9 @@ private:
             m_csm_uniforms.options.z = blend;
 
 			ImGui::Checkbox("Stable", &m_csm.m_stable_pssm);
+            ImGui::Checkbox("Debug Camera", &m_debug_mode);
+            ImGui::Checkbox("Show Frustum Splits", &m_show_frustum_splits);
+            ImGui::Checkbox("Show Cascade Frustum", &m_show_cascade_frustums);
             
             ImGui::SliderFloat("Lambda", &m_csm.m_lambda, 0, 1);
             
@@ -761,6 +771,42 @@ private:
             }
         }
         ImGui::End();
+    }
+    
+    // -----------------------------------------------------------------------------------------------------------------------------------
+    
+    void render_debug_view()
+    {
+        for (int i = 0; i < m_csm.m_split_count; i++)
+        {
+            FrustumSplit& split = m_csm.frustum_splits()[i];
+            
+            // Render frustum splits.
+            if (m_show_frustum_splits)
+            {
+                m_debug_draw.line(split.corners[0], split.corners[3], glm::vec3(1.0f));
+                m_debug_draw.line(split.corners[3], split.corners[2], glm::vec3(1.0f));
+                m_debug_draw.line(split.corners[2], split.corners[1], glm::vec3(1.0f));
+                m_debug_draw.line(split.corners[1], split.corners[0], glm::vec3(1.0f));
+                
+                m_debug_draw.line(split.corners[4], split.corners[7], glm::vec3(1.0f));
+                m_debug_draw.line(split.corners[7], split.corners[6], glm::vec3(1.0f));
+                m_debug_draw.line(split.corners[6], split.corners[5], glm::vec3(1.0f));
+                m_debug_draw.line(split.corners[5], split.corners[4], glm::vec3(1.0f));
+                
+                m_debug_draw.line(split.corners[0], split.corners[4], glm::vec3(1.0f));
+                m_debug_draw.line(split.corners[1], split.corners[5], glm::vec3(1.0f));
+                m_debug_draw.line(split.corners[2], split.corners[6], glm::vec3(1.0f));
+                m_debug_draw.line(split.corners[3], split.corners[7], glm::vec3(1.0f));
+            }
+            
+            // Render shadow frustums.
+            if (m_show_cascade_frustums)
+                m_debug_draw.frustum(m_csm.split_view_proj(i), glm::vec3(1.0f, 0.0f, 0.0f));
+        }
+        
+        if (m_debug_mode)
+            m_debug_draw.frustum(m_main_camera->m_projection, m_main_camera->m_view, glm::vec3(0.0f, 1.0f, 0.0f));
     }
     
     // -----------------------------------------------------------------------------------------------------------------------------------
@@ -803,7 +849,7 @@ private:
 	ObjectUniforms m_plane_transforms;
     ObjectUniforms m_suzanne_transforms;
     GlobalUniforms m_global_uniforms;
-    CSMUniforms    m_csm_uniforms;
+    CSMUniforms m_csm_uniforms;
 
 	// Cascaded Shadow Mapping.
 	CSM m_csm;
@@ -814,7 +860,11 @@ private:
     float m_heading_speed = 0.0f;
     float m_sideways_speed = 0.0f;
     float m_camera_sensitivity = 0.005f;
-    float m_camera_speed = 0.01f;
+    float m_camera_speed = 0.1f;
+    
+    // Debug options.
+    bool m_show_frustum_splits = false;
+    bool m_show_cascade_frustums = false;
 };
 
 DW_DECLARE_MAIN(Sample)
