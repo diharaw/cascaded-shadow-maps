@@ -108,7 +108,7 @@ void CSM::update(dw::Camera* camera, glm::vec3 dir)
 	glm::vec3 center = camera->m_position + camera->m_forward * 50.0f;
 	glm::vec3 light_pos = center - dir * ((camera->m_far - camera->m_near) / 2.0f);
 	glm::vec3 right = glm::cross(dir, glm::vec3(0.0f, 1.0f, 0.0f));
-	glm::vec3 up = glm::cross(right, dir);
+	glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f); // glm::cross(right, dir);
 
 	glm::mat4 modelview = glm::lookAt(light_pos, center, up);
 
@@ -124,7 +124,7 @@ void CSM::update(dw::Camera* camera, glm::vec3 dir)
 void CSM::update_splits(dw::Camera* camera)
 {
 	float nd = camera->m_near;
-	float fd = camera->m_far;
+	float fd = 200.0f;// camera->m_far;
 
 	float lambda = m_lambda;
 	float ratio = fd / nd;

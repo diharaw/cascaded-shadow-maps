@@ -107,7 +107,7 @@ float shadow_occlussion(float frag_depth, vec3 n, vec3 l)
 		if (frag_depth < far_bounds[i])
 		{
 			index = i;
-            blend = clamp( (frag_depth - far_bounds[i] * 0.995) * 50.0, 0.0, 1.0);
+            blend = clamp( (frag_depth - far_bounds[i] * 0.995) * 200.0, 0.0, 1.0);
 			break;
 		}
 	}
@@ -118,25 +118,34 @@ float shadow_occlussion(float frag_depth, vec3 n, vec3 l)
 	// Transform frag position into Light-space.
 	vec4 light_space_pos = texture_matrices[index] * vec4(PS_IN_WorldFragPos, 1.0f);
 
-	float shadow_map_depth = texture(s_ShadowMap, vec3(light_space_pos.xy, float(index))).r;
 	float current_depth = light_space_pos.z;
     
 	float bias = max(0.0005 * (1.0 - dot(n, l)), 0.0005);  
+
+	float shadow = 0.0;
+	vec2 texelSize = 1.0 / textureSize(s_ShadowMap, 0).xy;
+	for(int x = -1; x <= 1; ++x)
+	{
+	    for(int y = -1; y <= 1; ++y)
+	    {
+	        float pcfDepth = texture(s_ShadowMap, vec3(light_space_pos.xy + vec2(x, y) * texelSize, float(index))).r; 
+	        shadow += current_depth - bias > pcfDepth ? 1.0 : 0.0;        
+	    }    
+	}
+	shadow /= 9.0;
 	
-    float shadow = depth_compare(current_depth, shadow_map_depth, bias);
-    
     if (options.x == 1.0)
     {
-        if (blend > 0.0 && index != num_cascades - 1)
-        {
-            light_space_pos = texture_matrices[index + 1] * vec4(PS_IN_WorldFragPos, 1.0f);
-            shadow_map_depth = texture(s_ShadowMap, vec3(light_space_pos.xy, float(index + 1))).r;
-            current_depth = light_space_pos.z;
-            float next_shadow = depth_compare(current_depth, shadow_map_depth, bias);
-            
-            return (1.0 - blend) * shadow + blend * next_shadow;
-        }
-        else
+        //if (blend > 0.0 && index != num_cascades - 1)
+        //{
+        //    light_space_pos = texture_matrices[index + 1] * vec4(PS_IN_WorldFragPos, 1.0f);
+        //    shadow_map_depth = texture(s_ShadowMap, vec3(light_space_pos.xy, float(index + 1))).r;
+        //    current_depth = light_space_pos.z;
+        //    float next_shadow = depth_compare(current_depth, shadow_map_depth, bias);
+        //    
+        //    return (1.0 - blend) * shadow + blend * next_shadow;
+        //}
+        //else
             return shadow;
     }
     else
@@ -384,7 +393,7 @@ private:
         m_csm_uniforms.options.y = 0;
         m_csm_uniforms.options.z = 1;
 
-		m_csm.initialize(&m_device, 0.75f, CAMERA_FAR_PLANE, 3, 1024, m_main_camera, m_width, m_height, m_csm_uniforms.direction);
+		m_csm.initialize(&m_device, 0.75f, 100.0f, 3, 1024, m_main_camera, m_width, m_height, m_csm_uniforms.direction);
 	}
 
 	// -----------------------------------------------------------------------------------------------------------------------------------
