@@ -264,12 +264,14 @@ void CSM::update_crop_matrices(glm::mat4 t_modelview)
 			glm::vec4 min = glm::vec4(center - radius3, 1.0f);
 
 			max = t_shad_mvp * max;
-			max /= max.w;
+			max.x /= max.w;
+			max.y /= max.w;
 
 			tmax = glm::vec3(max);
 
 			min = t_shad_mvp * min;
-			min /= min.w;
+			min.x /= min.w;
+			min.y /= min.w;
 
 			tmin = glm::vec3(min);
 		}
