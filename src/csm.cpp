@@ -104,11 +104,13 @@ void CSM::shutdown()
 void CSM::update(dw::Camera* camera, glm::vec3 dir)
 {
 	dir = glm::normalize(dir);
+	m_light_direction = dir;
 
 	glm::vec3 center = camera->m_position + camera->m_forward * 50.0f;
 	glm::vec3 light_pos = center - dir * ((camera->m_far - camera->m_near) / 2.0f);
 	glm::vec3 right = glm::cross(dir, glm::vec3(0.0f, 1.0f, 0.0f));
-	glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f); // glm::cross(right, dir);
+
+	glm::vec3 up = m_stable_pssm ? camera->m_up : camera->m_right;
 
 	glm::mat4 modelview = glm::lookAt(light_pos, center, up);
 
@@ -116,7 +118,7 @@ void CSM::update(dw::Camera* camera, glm::vec3 dir)
 
 	update_splits(camera);
 	update_frustum_corners(camera);
-	update_crop_matrices(modelview);
+	update_crop_matrices(modelview, camera);
     update_texture_matrices(camera);
     update_far_bounds(camera);
 }
@@ -204,7 +206,7 @@ void CSM::update_far_bounds(dw::Camera* camera)
     }
 }
 
-void CSM::update_crop_matrices(glm::mat4 t_modelview)
+void CSM::update_crop_matrices(glm::mat4 t_modelview, dw::Camera* camera)
 {
 	glm::mat4 t_projection;
 	for (int i = 0; i < m_split_count; i++) 
@@ -231,52 +233,71 @@ void CSM::update_crop_matrices(glm::mat4 t_modelview)
 			if (t_transf.z < tmin.z) { tmin.z = t_transf.z; }
 		}
 
-		tmax.z += 50; // TODO: This solves the dissapearing shadow problem. but how to fix?
+		//tmax.z += 50; // TODO: This solves the dissapearing shadow problem. but how to fix?
 
-		glm::mat4 t_ortho = glm::ortho(-1.0f, 1.0f, -1.0f, 1.0f, -m_near_offset, -tmin.z);
-		glm::mat4 t_shad_mvp = t_ortho * t_modelview;
+		// Calculate frustum split center
+		t_frustum.center = glm::vec3(0.0f, 0.0f, 0.0f);
+
+		for (int j = 0; j < 8; j++)
+			t_frustum.center += t_frustum.corners[j];
+
+		t_frustum.center /= 8.0f;
 
 		if (m_stable_pssm)
 		{
-			// Calculate frustum split center
-			glm::vec3 center(0.0f, 0.0f, 0.0f);
-
-			for (int j = 0; j < 8; j++)
-				center += t_frustum.corners[j];
-			
-			center /= 8.0f;
-
 			// Calculate bounding sphere radius
 			float radius = 0.0f;
 
 			for (int j = 0; j < 8; j++)
 			{
-				float length = glm::length(t_frustum.corners[j] - center);
+				float length = glm::length(t_frustum.corners[j] - t_frustum.center);
 				radius = glm::max(radius, length);
 			}
 
-			radius = floor(radius);
+			radius = ceil(radius * 16.0f) / 16.0f;
 
 			// Find bounding box that fits the sphere
 			glm::vec3 radius3(radius, radius, radius);
 
-			glm::vec4 max = glm::vec4(center + radius3, 1.0f);
-			glm::vec4 min = glm::vec4(center - radius3, 1.0f);
+			glm::vec3 max = radius3;
+			glm::vec3 min = -radius3;
 
-			max = t_shad_mvp * max;
-			max.x /= max.w;
-			max.y /= max.w;
+			glm::vec3 cascade_extents = max - min;
 
-			tmax = glm::vec3(max);
+			// Push the light position back along the light direction by the near offset.
+			glm::vec3 shadow_camera_pos = t_frustum.center - m_light_direction * m_near_offset;
 
-			min = t_shad_mvp * min;
-			min.x /= min.w;
-			min.y /= min.w;
+			// Add the near offset to the Z value of the cascade extents to make sure the orthographic frustum captures the entire frustum split (else it will exhibit cut-off issues).
+			glm::mat4 ortho = glm::ortho(min.x, max.x, min.y, max.y, -m_near_offset, m_near_offset + cascade_extents.z);
+			glm::mat4 view = glm::lookAt(shadow_camera_pos, t_frustum.center, camera->m_up);
 
-			tmin = glm::vec3(min);
+			m_proj_matrices[i] = ortho;
+			m_crop_matrices[i] = ortho * view;
+
+			glm::vec4 shadow_origin = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+			shadow_origin = m_crop_matrices[i] * shadow_origin;
+			shadow_origin = shadow_origin * (m_shadow_map_size / 2.0f);
+
+			glm::vec4 rounded_origin = glm::round(shadow_origin);
+			glm::vec4 round_offset = rounded_origin - shadow_origin;
+			round_offset = round_offset * (2.0f / m_shadow_map_size);
+			round_offset.z = 0.0f;
+			round_offset.w = 0.0f;
+
+			glm::mat4& shadow_proj = m_proj_matrices[i];
+
+			shadow_proj[3][0] += round_offset.x;
+			shadow_proj[3][1] += round_offset.y;
+			shadow_proj[3][2] += round_offset.z;
+			shadow_proj[3][3] += round_offset.w;
+
+			m_crop_matrices[i] = shadow_proj * view;
 		}
 		else
 		{
+			glm::mat4 t_ortho = glm::ortho(-1.0f, 1.0f, -1.0f, 1.0f, -m_near_offset, -tmin.z);
+			glm::mat4 t_shad_mvp = t_ortho * t_modelview;
+
 			// find the extends of the frustum slice as projected in light's homogeneous coordinates
 			for (int j = 0; j < 8; j++)
 			{
@@ -290,22 +311,22 @@ void CSM::update_crop_matrices(glm::mat4 t_modelview)
 				if (t_transf.y > tmax.y) { tmax.y = t_transf.y; }
 				if (t_transf.y < tmin.y) { tmin.y = t_transf.y; }
 			}
+
+			glm::vec2 tscale(2.0f / (tmax.x - tmin.x), 2.0f / (tmax.y - tmin.y));
+			glm::vec2 toffset(-0.5f * (tmax.x + tmin.x) * tscale.x, -0.5f * (tmax.y + tmin.y) * tscale.y);
+
+			glm::mat4 t_shad_crop = glm::mat4(1.0f);
+			t_shad_crop[0][0] = tscale.x;
+			t_shad_crop[1][1] = tscale.y;
+			t_shad_crop[0][3] = toffset.x;
+			t_shad_crop[1][3] = toffset.y;
+			t_shad_crop = glm::transpose(t_shad_crop);
+
+			t_projection = t_shad_crop * t_ortho;
+
+			// Store the projection matrix
+			m_proj_matrices[i] = t_projection;
+			m_crop_matrices[i] = t_projection * t_modelview;
 		}
-		
-		glm::vec2 tscale(2.0f / (tmax.x - tmin.x), 2.0f / (tmax.y - tmin.y));
-		glm::vec2 toffset(-0.5f * (tmax.x + tmin.x) * tscale.x, -0.5f * (tmax.y + tmin.y) * tscale.y);
-
-		glm::mat4 t_shad_crop = glm::mat4(1.0f);
-		t_shad_crop[0][0] = tscale.x;
-		t_shad_crop[1][1] = tscale.y;
-		t_shad_crop[0][3] = toffset.x;
-		t_shad_crop[1][3] = toffset.y;
-		t_shad_crop = glm::transpose(t_shad_crop);
-
-		t_projection = t_shad_crop * t_ortho;
-
-		// Store the projection matrix
-		m_proj_matrices[i] = t_projection;
-		m_crop_matrices[i] = t_projection * t_modelview;
 	}
 }

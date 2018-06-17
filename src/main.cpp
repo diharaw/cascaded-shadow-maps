@@ -98,19 +98,17 @@ float depth_compare(float a, float b, float bias)
 
 float shadow_occlussion(float frag_depth, vec3 n, vec3 l)
 {
-	int index = num_cascades - 1;
+	int index = 0;
     float blend = 0.0;
     
 	// Find shadow cascade.
-	for (int i = 0; i < num_cascades; i++)
+	for (int i = 0; i < num_cascades - 1; i++)
 	{
-		if (frag_depth < far_bounds[i])
-		{
-			index = i;
-            blend = clamp( (frag_depth - far_bounds[i] * 0.995) * 200.0, 0.0, 1.0);
-			break;
-		}
+		if (frag_depth > far_bounds[i])
+			index = i + 1;
 	}
+
+	blend = clamp( (frag_depth - far_bounds[index] * 0.995) * 200.0, 0.0, 1.0);
     
     // Apply blend options.
     blend *= options.z;
@@ -146,7 +144,7 @@ float shadow_occlussion(float frag_depth, vec3 n, vec3 l)
         //    return (1.0 - blend) * shadow + blend * next_shadow;
         //}
         //else
-            return shadow;
+			return shadow;
     }
     else
         return 0.0;
@@ -154,16 +152,13 @@ float shadow_occlussion(float frag_depth, vec3 n, vec3 l)
 
 vec3 debug_color(float frag_depth)
 {
-	int index = num_cascades - 1;
+	int index = 0;
 
 	// Find shadow cascade.
-	for (int i = 0; i < num_cascades; i++)
+	for (int i = 0; i < num_cascades - 1; i++)
 	{
-		if (frag_depth < far_bounds[i])
-		{
-			index = i;
-			break;
-		}
+		if (frag_depth > far_bounds[i])
+			index = i + 1;
 	}
 
 	if (index == 0)
@@ -812,6 +807,9 @@ private:
             // Render shadow frustums.
             if (m_show_cascade_frustums)
                 m_debug_draw.frustum(m_csm.split_view_proj(i), glm::vec3(1.0f, 0.0f, 0.0f));
+
+			// Visualize frustum center.
+			m_debug_draw.sphere(2.0f, split.center, glm::vec3(1.0f, 1.0f, 0.0f));
         }
         
         if (m_debug_mode)

@@ -16,6 +16,7 @@ struct FrustumSplit
 	float far_plane;
 	float ratio;
 	float fov;
+	glm::vec3 center;
 	glm::vec3 corners[8];
 };
 
@@ -30,6 +31,7 @@ struct CSM
 	FrustumSplit m_splits[MAX_FRUSTUM_SPLITS];
     float m_far_bounds[MAX_FRUSTUM_SPLITS];
 	RenderDevice* m_device;
+	glm::vec3 m_light_direction;
     glm::mat4 m_bias;
 	glm::mat4 m_light_view;
 	glm::mat4 m_crop_matrices[MAX_FRUSTUM_SPLITS]; // crop * proj * view
@@ -44,7 +46,7 @@ struct CSM
 	void update(dw::Camera* camera, glm::vec3 dir);
 	void update_splits(dw::Camera* camera);
 	void update_frustum_corners(dw::Camera* camera);
-	void update_crop_matrices(glm::mat4 t_modelview);
+	void update_crop_matrices(glm::mat4 t_modelview, dw::Camera* camera);
     void update_texture_matrices(dw::Camera* camera);
     void update_far_bounds(dw::Camera* camera);
 	
