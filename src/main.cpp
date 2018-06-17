@@ -392,13 +392,13 @@ private:
     
 	void initialize_csm()
 	{
-		m_csm_uniforms.direction = glm::vec4(glm::vec3(-1.0f, -1.0f, -1.0f), 0.0f);
+		m_csm_uniforms.direction = glm::vec4(glm::vec3(m_light_dir_x, -1.0f, m_light_dir_z), 0.0f);
 		m_csm_uniforms.direction = glm::normalize(m_csm_uniforms.direction);
         m_csm_uniforms.options.x = 1;
         m_csm_uniforms.options.y = 0;
         m_csm_uniforms.options.z = 1;
 
-		m_csm.initialize(&m_device, m_pssm_lambda, 100.0f, m_cascade_count, m_shadow_map_size, m_main_camera, m_width, m_height, m_csm_uniforms.direction);
+		m_csm.initialize(&m_device, m_pssm_lambda, m_near_offset, m_cascade_count, m_shadow_map_size, m_main_camera, m_width, m_height, m_csm_uniforms.direction);
 	}
 
 	// -----------------------------------------------------------------------------------------------------------------------------------
@@ -535,7 +535,7 @@ private:
 	bool load_mesh()
 	{
 		//m_plane = dw::Mesh::load("plane.obj", &m_device);
-        m_suzanne = dw::Mesh::load("village_house_obj.obj", &m_device);
+        m_suzanne = dw::Mesh::load("sponza.obj", &m_device, false);
 		return m_suzanne != nullptr;
 	}
 
@@ -701,7 +701,7 @@ private:
         m_suzanne_transforms.model = glm::mat4(1.0f);
         m_suzanne_transforms.model = glm::translate(m_suzanne_transforms.model, glm::vec3(0.0f, 3.0f, 0.0f));
        // m_suzanne_transforms.model = glm::rotate(m_suzanne_transforms.model, (float)glfwGetTime(), glm::vec3(0.0f, 1.0f, 0.0f));
-        m_suzanne_transforms.model = glm::scale(m_suzanne_transforms.model, glm::vec3(0.2f));
+        m_suzanne_transforms.model = glm::scale(m_suzanne_transforms.model, glm::vec3(0.1f));
     }
 
     // -----------------------------------------------------------------------------------------------------------------------------------
@@ -763,10 +763,25 @@ private:
             
             int split_count = m_csm.m_split_count;
             ImGui::SliderInt("Frustum Splits", &split_count, 1, 4);
-            
+
             if (split_count != m_csm.m_split_count)
                 m_csm.initialize(&m_device, m_csm.m_lambda, m_csm.m_near_offset, split_count, m_csm.m_shadow_map_size, m_main_camera, m_width, m_height, glm::vec3(m_csm_uniforms.direction));
             
+			float near_offset = m_csm.m_near_offset;
+			ImGui::SliderFloat("Near Offset", &near_offset, 100.0f, 1000.0f);
+
+			if (m_near_offset != near_offset)
+			{
+				m_near_offset = near_offset;
+				m_csm.initialize(&m_device, m_csm.m_lambda, m_near_offset, split_count, m_csm.m_shadow_map_size, m_main_camera, m_width, m_height, glm::vec3(m_csm_uniforms.direction));
+			}
+
+			ImGui::SliderFloat("Light Direction X", &m_light_dir_x, 0.0f, 1.0f);
+			ImGui::SliderFloat("Light Direction Z", &m_light_dir_z, 0.0f, 1.0f);
+
+			m_csm_uniforms.direction = glm::vec4(glm::vec3(m_light_dir_x, -1.0f, m_light_dir_z), 0.0f);
+			m_csm_uniforms.direction = glm::normalize(m_csm_uniforms.direction);
+
             static const char* items[] = { "256", "512", "1024", "2048" };
             static const int shadow_map_sizes[] = { 256, 512, 1024, 2048 };
             static int item_current = 3;
@@ -880,6 +895,9 @@ private:
 	int m_shadow_map_size = 2048;
 	int m_cascade_count = 4;
 	float m_pssm_lambda = 0.3;
+	float m_near_offset = 250.0f;
+	float m_light_dir_x = -1.0f;
+	float m_light_dir_z = 0.0f;
     
     // Debug options.
     bool m_show_frustum_splits = false;
