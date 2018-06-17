@@ -351,10 +351,6 @@ protected:
             m_sideways_speed = -m_camera_speed;
         else if(code == GLFW_KEY_D)
             m_sideways_speed = m_camera_speed;
-        
-        // Enable mouse look.
-        if(code == GLFW_KEY_SPACE)
-            m_mouse_look = true;
     }
     
     // -----------------------------------------------------------------------------------------------------------------------------------
@@ -368,13 +364,27 @@ protected:
         // Handle sideways movement.
         if(code == GLFW_KEY_A || code == GLFW_KEY_D)
             m_sideways_speed = 0.0f;
-        
-        // Disable mouse look.
-        if(code == GLFW_KEY_SPACE)
-            m_mouse_look = false;
     }
     
     // -----------------------------------------------------------------------------------------------------------------------------------
+
+	void mouse_pressed(int code) override
+	{
+		// Enable mouse look.
+		if (code == GLFW_MOUSE_BUTTON_LEFT)
+			m_mouse_look = true;
+	}
+
+	// -----------------------------------------------------------------------------------------------------------------------------------
+
+	void mouse_released(int code) override
+	{
+		// Disable mouse look.
+		if (code == GLFW_MOUSE_BUTTON_LEFT)
+			m_mouse_look = false;
+	}
+
+	// -----------------------------------------------------------------------------------------------------------------------------------
 
 private:
     
@@ -388,7 +398,7 @@ private:
         m_csm_uniforms.options.y = 0;
         m_csm_uniforms.options.z = 1;
 
-		m_csm.initialize(&m_device, 0.75f, 100.0f, 3, 1024, m_main_camera, m_width, m_height, m_csm_uniforms.direction);
+		m_csm.initialize(&m_device, m_pssm_lambda, 100.0f, m_cascade_count, m_shadow_map_size, m_main_camera, m_width, m_height, m_csm_uniforms.direction);
 	}
 
 	// -----------------------------------------------------------------------------------------------------------------------------------
@@ -524,9 +534,9 @@ private:
 
 	bool load_mesh()
 	{
-		m_plane = dw::Mesh::load("plane.obj", &m_device);
+		//m_plane = dw::Mesh::load("plane.obj", &m_device);
         m_suzanne = dw::Mesh::load("village_house_obj.obj", &m_device);
-		return m_plane != nullptr && m_suzanne != nullptr;
+		return m_suzanne != nullptr;
 	}
 
 	// -----------------------------------------------------------------------------------------------------------------------------------
@@ -759,7 +769,7 @@ private:
             
             static const char* items[] = { "256", "512", "1024", "2048" };
             static const int shadow_map_sizes[] = { 256, 512, 1024, 2048 };
-            static int item_current = 2;
+            static int item_current = 3;
             ImGui::Combo("Shadow Map Size", &item_current, items, IM_ARRAYSIZE(items));
             
             if (shadow_map_sizes[item_current] != m_csm.m_shadow_map_size)
@@ -807,9 +817,6 @@ private:
             // Render shadow frustums.
             if (m_show_cascade_frustums)
                 m_debug_draw.frustum(m_csm.split_view_proj(i), glm::vec3(1.0f, 0.0f, 0.0f));
-
-			// Visualize frustum center.
-			m_debug_draw.sphere(2.0f, split.center, glm::vec3(1.0f, 1.0f, 0.0f));
         }
         
         if (m_debug_mode)
@@ -868,6 +875,11 @@ private:
     float m_sideways_speed = 0.0f;
     float m_camera_sensitivity = 0.005f;
     float m_camera_speed = 0.1f;
+
+	// Default shadow options.
+	int m_shadow_map_size = 2048;
+	int m_cascade_count = 4;
+	float m_pssm_lambda = 0.3;
     
     // Debug options.
     bool m_show_frustum_splits = false;
