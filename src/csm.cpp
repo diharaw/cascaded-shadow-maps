@@ -1,5 +1,4 @@
 #include "csm.h"
-#include <render_device.h>
 #include <gtc/matrix_transform.hpp>
 #include <macros.h>
 
@@ -18,9 +17,8 @@ CSM::~CSM()
 	
 }
 
-void CSM::initialize(RenderDevice* device, float lambda, float near_offset, int split_count, int shadow_map_size, dw::Camera* camera, int _width, int _height, glm::vec3 dir)
+void CSM::initialize(float lambda, float near_offset, int split_count, int shadow_map_size, dw::Camera* camera, int _width, int _height, glm::vec3 dir)
 {
-	m_device = device;
 	m_lambda = lambda;
 	m_near_offset = near_offset;
 	m_split_count = split_count;
@@ -28,7 +26,7 @@ void CSM::initialize(RenderDevice* device, float lambda, float near_offset, int 
     
     if (m_shadow_maps)
     {
-        m_device->destroy(m_shadow_maps);
+        DW_SAFE_DELETE(m_shadow_maps);
         m_shadow_maps = nullptr;
     }
 
@@ -36,36 +34,20 @@ void CSM::initialize(RenderDevice* device, float lambda, float near_offset, int 
 	{
 		if (m_shadow_fbos[i])
         {
-            m_device->destroy(m_shadow_fbos[i]);
+            DW_SAFE_DELETE(m_shadow_fbos[i]);
             m_shadow_fbos[i] = nullptr;
         }
 	}
 
-	Texture2DArrayCreateDesc desc;
-	DW_ZERO_MEMORY(desc);
-
-	desc.array_slices = m_split_count;
-	desc.format = TextureFormat::D32_FLOAT_S8_UINT;
-	desc.height = m_shadow_map_size;
-	desc.width = m_shadow_map_size;
-	desc.mipmap_levels = 1;
-	
-	m_shadow_maps = device->create_texture_2d_array(desc);
-
+    m_shadow_maps = new dw::Texture2D(m_shadow_map_size, m_shadow_map_size, m_split_count, 1, 1, GL_DEPTH_STENCIL, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8);
+    m_shadow_maps->set_min_filter(GL_NEAREST);
+    m_shadow_maps->set_mag_filter(GL_NEAREST);
+    m_shadow_maps->set_wrapping(GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE);
+    
 	for (int i = 0; i < m_split_count; i++)
 	{
-		DepthStencilTargetDesc ds_desc;
-
-		ds_desc.arraySlice = i;
-		ds_desc.mipSlice = 0;
-		ds_desc.texture = m_shadow_maps;
-		
-		FramebufferCreateDesc fbo_desc;
-
-		fbo_desc.renderTargetCount = 0;
-		fbo_desc.depthStencilTarget = ds_desc;
-
-		m_shadow_fbos[i] = device->create_framebuffer(fbo_desc);
+        m_shadow_fbos[i] = new dw::Framebuffer();
+        m_shadow_fbos[i]->attach_depth_stencil_target(m_shadow_maps, i, 0);
 	}
 
 	float camera_fov = camera->m_fov;
@@ -95,10 +77,10 @@ void CSM::shutdown()
 	for (int i = 0; i < 8; i++)
 	{
 		if (m_shadow_fbos[i])
-			m_device->destroy(m_shadow_fbos[i]);
+			DW_SAFE_DELETE(m_shadow_fbos[i]);
 	}
 
-	m_device->destroy(m_shadow_maps);
+	DW_SAFE_DELETE(m_shadow_maps);
 }
 
 void CSM::update(dw::Camera* camera, glm::vec3 dir)

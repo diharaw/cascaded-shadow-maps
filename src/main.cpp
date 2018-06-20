@@ -2,6 +2,7 @@
 #include <mesh.h>
 #include <camera.h>
 #include <material.h>
+#include <memory>
 #include "csm.h"
 
 // Embedded vertex shader source.
@@ -241,9 +242,6 @@ protected:
 	bool init(int argc, const char* argv[]) override
 	{
 		// Create GPU resources.
-		if (!create_states())
-			return false;
-
 		if (!create_shaders())
 			return false;
 
@@ -274,10 +272,10 @@ protected:
         update_camera();
         
         // Update CSM.
-        m_csm.update(m_main_camera, m_csm_uniforms.direction);
+        m_csm.update(m_main_camera.get(), m_csm_uniforms.direction);
     
 		// Update transforms.
-        update_transforms(m_debug_mode ? m_debug_camera : m_main_camera);
+        update_transforms(m_debug_mode ? m_debug_camera.get() : m_main_camera.get());
 
         // Render debug view.
         render_debug_view();
@@ -298,30 +296,10 @@ protected:
 	{
 		// Cleanup CSM.
 		m_csm.shutdown();
-
-		// Destroy camera.
-		DW_SAFE_DELETE(m_main_camera);
-        DW_SAFE_DELETE(m_debug_camera);
-
+        
 		// Unload assets.
 		dw::Mesh::unload(m_plane);
         dw::Mesh::unload(m_suzanne);
-
-		// Cleanup GPU resources.
-		m_device.destroy(m_object_ubo);
-        m_device.destroy(m_global_ubo);
-        m_device.destroy(m_csm_ubo);
-        m_device.destroy(m_csm_program);
-        m_device.destroy(m_csm_fs);
-        m_device.destroy(m_csm_vs);
-		m_device.destroy(m_program);
-		m_device.destroy(m_fs);
-		m_device.destroy(m_vs);
-		m_device.destroy(m_ds);
-		m_device.destroy(m_rs);
-        m_device.destroy(m_shadow_map_rs);
-		m_device.destroy(m_shadow_sampler);
-		m_device.destroy(m_sampler);
 	}
 
 	// -----------------------------------------------------------------------------------------------------------------------------------
@@ -398,7 +376,7 @@ private:
         m_csm_uniforms.options.y = 0;
         m_csm_uniforms.options.z = 1;
 
-		m_csm.initialize(&m_device, m_pssm_lambda, m_near_offset, m_cascade_count, m_shadow_map_size, m_main_camera, m_width, m_height, m_csm_uniforms.direction);
+		m_csm.initialize(m_pssm_lambda, m_near_offset, m_cascade_count, m_shadow_map_size, m_main_camera.get(), m_width, m_height, m_csm_uniforms.direction);
 	}
 
 	// -----------------------------------------------------------------------------------------------------------------------------------
@@ -406,8 +384,8 @@ private:
 	bool create_shaders()
 	{
 		// Create general shaders
-		m_vs = m_device.create_shader(g_sample_vs_src, ShaderType::VERTEX);
-		m_fs = m_device.create_shader(g_sample_fs_src, ShaderType::FRAGMENT);
+        m_vs = std::make_unique<dw::Shader>(GL_VERTEX_SHADER, g_sample_vs_src);
+		m_fs = std::make_unique<dw::Shader>(GL_FRAGMENT_SHADER, g_sample_fs_src);
 
 		if (!m_vs || !m_fs)
 		{
@@ -416,8 +394,8 @@ private:
 		}
 
 		// Create general shader program
-		Shader* shaders[] = { m_vs, m_fs };
-		m_program = m_device.create_shader_program(shaders, 2);
+        dw::Shader* shaders[] = { m_vs.get(), m_fs.get() };
+        m_program = std::make_unique<dw::Program>(2, shaders);
 
 		if (!m_program)
 		{
@@ -425,9 +403,13 @@ private:
 			return false;
 		}
         
+        m_program->uniform_block_binding("GlobalUniforms", 0);
+        m_program->uniform_block_binding("ObjectUniforms", 1);
+        m_program->uniform_block_binding("CSMUniforms", 2);
+        
         // Create CSM shaders
-        m_csm_vs = m_device.create_shader(g_csm_vs_src, ShaderType::VERTEX);
-        m_csm_fs = m_device.create_shader(g_csm_fs_src, ShaderType::FRAGMENT);
+        m_csm_vs = std::make_unique<dw::Shader>(GL_VERTEX_SHADER, g_csm_vs_src);
+        m_csm_fs = std::make_unique<dw::Shader>(GL_FRAGMENT_SHADER, g_csm_fs_src);
         
         if (!m_csm_vs || !m_csm_fs)
         {
@@ -436,96 +418,88 @@ private:
         }
         
         // Create CSM shader program
-        Shader* csm_shaders[] = { m_csm_vs, m_csm_fs };
-        m_csm_program = m_device.create_shader_program(csm_shaders, 2);
+        dw::Shader* csm_shaders[] = { m_csm_vs.get(), m_csm_fs.get() };
+        m_csm_program = std::make_unique<dw::Program>(2, csm_shaders);
         
         if (!m_csm_program)
         {
             DW_LOG_FATAL("Failed to create CSM Shader Program");
             return false;
         }
+        
+        m_csm_program->uniform_block_binding("GlobalUniforms", 0);
+        m_csm_program->uniform_block_binding("ObjectUniforms", 1);
 
 		return true;
 	}
 
 	// -----------------------------------------------------------------------------------------------------------------------------------
 
-	bool create_states()
-	{
-		// Create rasterizer state
-		RasterizerStateCreateDesc rs_desc;
-		DW_ZERO_MEMORY(rs_desc);
-		rs_desc.cull_mode = CullMode::BACK;
-		rs_desc.fill_mode = FillMode::SOLID;
-		rs_desc.front_winding_ccw = true;
-		rs_desc.multisample = true;
-		rs_desc.scissor = false;
-
-		m_rs = m_device.create_rasterizer_state(rs_desc);
-        
-        // Create second rasterizer state with front-face culling for shadow mapping.
-        rs_desc.cull_mode = CullMode::FRONT;
-        
-        m_shadow_map_rs = m_device.create_rasterizer_state(rs_desc);
-
-		// Create depth stencil state
-		DepthStencilStateCreateDesc ds_desc;
-		DW_ZERO_MEMORY(ds_desc);
-		ds_desc.depth_mask = true;
-		ds_desc.enable_depth_test = true;
-		ds_desc.enable_stencil_test = false;
-		ds_desc.depth_cmp_func = ComparisonFunction::LESS_EQUAL;
-
-		m_ds = m_device.create_depth_stencil_state(ds_desc);
-
-		// Create sampler state.
-		SamplerStateCreateDesc ss_desc;
-		DW_ZERO_MEMORY(ss_desc);
-		ss_desc.min_filter = TextureFilteringMode::ANISOTROPIC_ALL;
-		ss_desc.mag_filter = TextureFilteringMode::ANISOTROPIC_ALL;
-        ss_desc.max_anisotropy = 16;
-		ss_desc.wrap_mode_u = TextureWrapMode::REPEAT;
-		ss_desc.wrap_mode_v = TextureWrapMode::REPEAT;
-		ss_desc.wrap_mode_w = TextureWrapMode::REPEAT;
-
-		m_sampler = m_device.create_sampler_state(ss_desc);
-
-		// Sampler state for Shadow map.
-		ss_desc.min_filter = TextureFilteringMode::NEAREST;
-		ss_desc.mag_filter = TextureFilteringMode::NEAREST;
-		ss_desc.max_anisotropy = 0;
-		ss_desc.wrap_mode_u = TextureWrapMode::CLAMP_TO_EDGE;
-		ss_desc.wrap_mode_v = TextureWrapMode::CLAMP_TO_EDGE;
-		ss_desc.wrap_mode_w = TextureWrapMode::CLAMP_TO_EDGE;
-
-		m_shadow_sampler = m_device.create_sampler_state(ss_desc);
-
-		return true;
-	}
+//    bool create_states()
+//    {
+//        // Create rasterizer state
+//        RasterizerStateCreateDesc rs_desc;
+//        DW_ZERO_MEMORY(rs_desc);
+//        rs_desc.cull_mode = CullMode::BACK;
+//        rs_desc.fill_mode = FillMode::SOLID;
+//        rs_desc.front_winding_ccw = true;
+//        rs_desc.multisample = true;
+//        rs_desc.scissor = false;
+//
+//        m_rs = m_device.create_rasterizer_state(rs_desc);
+//
+//        // Create second rasterizer state with front-face culling for shadow mapping.
+//        rs_desc.cull_mode = CullMode::FRONT;
+//
+//        m_shadow_map_rs = m_device.create_rasterizer_state(rs_desc);
+//
+//        // Create depth stencil state
+//        DepthStencilStateCreateDesc ds_desc;
+//        DW_ZERO_MEMORY(ds_desc);
+//        ds_desc.depth_mask = true;
+//        ds_desc.enable_depth_test = true;
+//        ds_desc.enable_stencil_test = false;
+//        ds_desc.depth_cmp_func = ComparisonFunction::LESS_EQUAL;
+//
+//        m_ds = m_device.create_depth_stencil_state(ds_desc);
+//
+//        // Create sampler state.
+//        SamplerStateCreateDesc ss_desc;
+//        DW_ZERO_MEMORY(ss_desc);
+//        ss_desc.min_filter = TextureFilteringMode::ANISOTROPIC_ALL;
+//        ss_desc.mag_filter = TextureFilteringMode::ANISOTROPIC_ALL;
+//        ss_desc.max_anisotropy = 16;
+//        ss_desc.wrap_mode_u = TextureWrapMode::REPEAT;
+//        ss_desc.wrap_mode_v = TextureWrapMode::REPEAT;
+//        ss_desc.wrap_mode_w = TextureWrapMode::REPEAT;
+//
+//        m_sampler = m_device.create_sampler_state(ss_desc);
+//
+//        // Sampler state for Shadow map.
+//        ss_desc.min_filter = TextureFilteringMode::NEAREST;
+//        ss_desc.mag_filter = TextureFilteringMode::NEAREST;
+//        ss_desc.max_anisotropy = 0;
+//        ss_desc.wrap_mode_u = TextureWrapMode::CLAMP_TO_EDGE;
+//        ss_desc.wrap_mode_v = TextureWrapMode::CLAMP_TO_EDGE;
+//        ss_desc.wrap_mode_w = TextureWrapMode::CLAMP_TO_EDGE;
+//
+//        m_shadow_sampler = m_device.create_sampler_state(ss_desc);
+//
+//        return true;
+//    }
 
 	// -----------------------------------------------------------------------------------------------------------------------------------
 
 	bool create_uniform_buffer()
 	{
 		// Create uniform buffer for object matrix data
-		BufferCreateDesc uboDesc;
-		DW_ZERO_MEMORY(uboDesc);
-		uboDesc.data = nullptr;
-		uboDesc.data_type = DataType::FLOAT;
-		uboDesc.size = sizeof(ObjectUniforms);
-		uboDesc.usage_type = BufferUsageType::DYNAMIC;
-
-		m_object_ubo = m_device.create_uniform_buffer(uboDesc);
+        m_object_ubo = std::make_unique<dw::UniformBuffer>(GL_DYNAMIC_DRAW, sizeof(ObjectUniforms));
         
         // Create uniform buffer for global data
-        uboDesc.size = sizeof(GlobalUniforms);
-        
-        m_global_ubo = m_device.create_uniform_buffer(uboDesc);
+        m_global_ubo = std::make_unique<dw::UniformBuffer>(GL_DYNAMIC_DRAW, sizeof(GlobalUniforms));
         
         // Create uniform buffer for CSM data
-        uboDesc.size = sizeof(CSMUniforms);
-        
-        m_csm_ubo = m_device.create_uniform_buffer(uboDesc);
+        m_csm_ubo = std::make_unique<dw::UniformBuffer>(GL_DYNAMIC_DRAW, sizeof(CSMUniforms));
 
 		return true;
 	}
@@ -535,7 +509,7 @@ private:
 	bool load_mesh()
 	{
 		//m_plane = dw::Mesh::load("plane.obj", &m_device);
-        m_suzanne = dw::Mesh::load("sponza.obj", &m_device, false);
+        m_suzanne = dw::Mesh::load("sponza.obj", false);
 		return m_suzanne != nullptr;
 	}
 
@@ -543,8 +517,8 @@ private:
 
 	void create_camera()
 	{
-		m_main_camera = new dw::Camera(60.0f, 0.1f, CAMERA_FAR_PLANE, float(m_width) / float(m_height), glm::vec3(0.0f, 5.0f, 20.0f), glm::vec3(0.0f, 0.0, -1.0f));
-        m_debug_camera = new dw::Camera(60.0f, 0.1f, CAMERA_FAR_PLANE * 2.0f, float(m_width) / float(m_height), glm::vec3(0.0f, 5.0f, 20.0f), glm::vec3(0.0f, 0.0, -1.0f));
+        m_main_camera = std::make_unique<dw::Camera>(60.0f, 0.1f, CAMERA_FAR_PLANE, float(m_width) / float(m_height), glm::vec3(0.0f, 5.0f, 20.0f), glm::vec3(0.0f, 0.0, -1.0f));
+        m_debug_camera = std::make_unique<dw::Camera>(60.0f, 0.1f, CAMERA_FAR_PLANE * 2.0f, float(m_width) / float(m_height), glm::vec3(0.0f, 5.0f, 20.0f), glm::vec3(0.0f, 0.0, -1.0f));
 	}
 
 	// -----------------------------------------------------------------------------------------------------------------------------------
@@ -555,18 +529,11 @@ private:
         update_object_uniforms(transforms);
 
 		// Bind uniform buffers.
-        m_device.bind_uniform_buffer(m_global_ubo, ShaderType::VERTEX, 0);
-		m_device.bind_uniform_buffer(m_object_ubo, ShaderType::VERTEX, 1);
+        m_global_ubo->bind_base(0);
+        m_object_ubo->bind_base(1);
 
 		// Bind vertex array.
-		m_device.bind_vertex_array(mesh->mesh_vertex_array());
-
-		// Set primitive type.
-		m_device.set_primitive_type(PrimitiveType::TRIANGLES);
-
-		// Bind sampler.
-        if (use_textures)
-            m_device.bind_sampler_state(m_sampler, ShaderType::FRAGMENT, 0);
+        mesh->mesh_vertex_array()->bind();
 
 		for (uint32_t i = 0; i < mesh->sub_mesh_count(); i++)
 		{
@@ -574,10 +541,10 @@ private:
 
 			// Bind texture.
             if (use_textures)
-                m_device.bind_texture(submesh.mat->texture(0), ShaderType::FRAGMENT, 0);
+                submesh.mat->texture(0)->bind(0);
 
 			// Issue draw call.
-			m_device.draw_indexed_base_vertex(submesh.index_count, submesh.base_index, submesh.base_vertex);
+			glDrawElementsBaseVertex(GL_TRIANGLES, submesh.index_count, GL_UNSIGNED_INT, (void*)(sizeof(unsigned int) * submesh.base_index), submesh.base_vertex);
 		}
 	}
     
@@ -591,26 +558,29 @@ private:
         // Update CSM uniforms.
         update_csm_uniforms(m_csm_uniforms);
         
-        // Bind and clear framebuffer.
-        m_device.bind_framebuffer(nullptr);
-        m_device.set_viewport(m_width, m_height, 0, 0);
-        
+        // Bind and set viewport.
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, m_width, m_height);
+  
         // Clear default framebuffer.
-        m_device.clear_framebuffer(ClearTarget::ALL, m_clear_color);
+        glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         
         // Bind states.
-        m_device.bind_rasterizer_state(m_rs);
-        m_device.bind_depth_stencil_state(m_ds);
+        glEnable(GL_DEPTH_TEST);
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_BACK);
         
         // Bind shader program.
-        m_device.bind_shader_program(m_program);
+        m_program->use();
         
         // Bind shadow map.
-        m_device.bind_sampler_state(m_shadow_sampler, ShaderType::FRAGMENT, 1);
-        m_device.bind_texture(m_csm.shadow_map(), ShaderType::FRAGMENT, 1);
+        m_csm.shadow_map()->bind(1);
         
+        m_program->set_uniform("s_ShadowMap", 1);
+
         // Bind uniform buffers.
-        m_device.bind_uniform_buffer(m_csm_ubo, ShaderType::FRAGMENT, 2);
+        m_csm_ubo->bind_base(2);
         
         // Draw meshes.
         //render_mesh(m_plane, m_plane_transforms);
@@ -622,10 +592,12 @@ private:
     void render_shadow_map()
     {
         // Bind states.
-        m_device.bind_depth_stencil_state(m_ds);
+        glEnable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);
+        glCullFace(GL_BACK);
         
         // Bind shader program.
-        m_device.bind_shader_program(m_csm_program);
+        m_csm_program->use();
         
         for (int i = 0; i < m_csm.frustum_split_count(); i++)
         {
@@ -634,18 +606,18 @@ private:
             
             update_global_uniforms(m_global_uniforms);
             
-            // Bind and clear framebuffer.
-            m_device.bind_framebuffer(m_csm.framebuffers()[i]);
-            m_device.set_viewport(m_csm.shadow_map_size(), m_csm.shadow_map_size(), 0, 0);
+            // Bind and set viewport.
+            m_csm.framebuffers()[i]->bind();
+            glViewport(0, 0, m_csm.shadow_map_size(), m_csm.shadow_map_size());
             
             // Clear default framebuffer.
-            m_device.clear_framebuffer(ClearTarget::ALL, m_clear_color);
+            glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             
             // Draw meshes. Disable textures because we don't need them here.
 			//m_device.bind_rasterizer_state(m_rs);
            // render_mesh(m_plane, m_plane_transforms, false);
 
-			m_device.bind_rasterizer_state(m_shadow_map_rs);
             render_mesh(m_suzanne, m_suzanne_transforms, false);
         }
     }
@@ -654,27 +626,27 @@ private:
 
 	void update_object_uniforms(const ObjectUniforms& transform)
 	{
-		void* ptr = m_device.map_buffer(m_object_ubo, BufferMapType::WRITE);
+        void* ptr = m_object_ubo->map(GL_WRITE_ONLY);
 		memcpy(ptr, &transform, sizeof(ObjectUniforms));
-		m_device.unmap_buffer(m_object_ubo);
+        m_object_ubo->unmap();
 	}
     
     // -----------------------------------------------------------------------------------------------------------------------------------
     
     void update_csm_uniforms(const CSMUniforms& csm)
     {
-        void* ptr = m_device.map_buffer(m_csm_ubo, BufferMapType::WRITE);
+        void* ptr = m_csm_ubo->map(GL_WRITE_ONLY);
         memcpy(ptr, &csm, sizeof(CSMUniforms));
-        m_device.unmap_buffer(m_csm_ubo);
+        m_csm_ubo->unmap();
     }
     
     // -----------------------------------------------------------------------------------------------------------------------------------
     
     void update_global_uniforms(const GlobalUniforms& global)
     {
-        void* ptr = m_device.map_buffer(m_global_ubo, BufferMapType::WRITE);
+        void* ptr = m_global_ubo->map(GL_WRITE_ONLY);
         memcpy(ptr, &global, sizeof(GlobalUniforms));
-        m_device.unmap_buffer(m_global_ubo);
+        m_global_ubo->unmap();
     }
     
     // -----------------------------------------------------------------------------------------------------------------------------------
@@ -708,10 +680,10 @@ private:
     
     void update_camera()
     {
-        dw::Camera* current = m_main_camera;
+        dw::Camera* current = m_main_camera.get();
         
         if (m_debug_mode)
-            current = m_debug_camera;
+            current = m_debug_camera.get();
         
         float forward_delta = m_heading_speed * m_delta;
         float right_delta = m_sideways_speed * m_delta;
@@ -765,7 +737,7 @@ private:
             ImGui::SliderInt("Frustum Splits", &split_count, 1, 4);
 
             if (split_count != m_csm.m_split_count)
-                m_csm.initialize(&m_device, m_csm.m_lambda, m_csm.m_near_offset, split_count, m_csm.m_shadow_map_size, m_main_camera, m_width, m_height, glm::vec3(m_csm_uniforms.direction));
+                m_csm.initialize(m_csm.m_lambda, m_csm.m_near_offset, split_count, m_csm.m_shadow_map_size, m_main_camera.get(), m_width, m_height, glm::vec3(m_csm_uniforms.direction));
             
 			float near_offset = m_csm.m_near_offset;
 			ImGui::SliderFloat("Near Offset", &near_offset, 100.0f, 1000.0f);
@@ -773,7 +745,7 @@ private:
 			if (m_near_offset != near_offset)
 			{
 				m_near_offset = near_offset;
-				m_csm.initialize(&m_device, m_csm.m_lambda, m_near_offset, split_count, m_csm.m_shadow_map_size, m_main_camera, m_width, m_height, glm::vec3(m_csm_uniforms.direction));
+				m_csm.initialize(m_csm.m_lambda, m_near_offset, split_count, m_csm.m_shadow_map_size, m_main_camera.get(), m_width, m_height, glm::vec3(m_csm_uniforms.direction));
 			}
 
 			ImGui::SliderFloat("Light Direction X", &m_light_dir_x, 0.0f, 1.0f);
@@ -788,7 +760,7 @@ private:
             ImGui::Combo("Shadow Map Size", &item_current, items, IM_ARRAYSIZE(items));
             
             if (shadow_map_sizes[item_current] != m_csm.m_shadow_map_size)
-                m_csm.initialize(&m_device, m_csm.m_lambda, m_csm.m_near_offset, m_csm.m_split_count, shadow_map_sizes[item_current], m_main_camera, m_width, m_height, glm::vec3(m_csm_uniforms.direction));
+                m_csm.initialize(m_csm.m_lambda, m_csm.m_near_offset, m_csm.m_split_count, shadow_map_sizes[item_current], m_main_camera.get(), m_width, m_height, glm::vec3(m_csm_uniforms.direction));
             
             static int current_view = 0;
             ImGui::RadioButton("Scene", &current_view, 0);
@@ -845,34 +817,25 @@ private:
 	float m_clear_color[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
 
 	// General GPU resources.
-	Shader* m_vs;
-	Shader* m_fs;
-	ShaderProgram* m_program;
-	UniformBuffer* m_object_ubo;
-    UniformBuffer* m_csm_ubo;
-    UniformBuffer* m_global_ubo;
-    RasterizerState* m_rs;
-	DepthStencilState* m_ds;
-	SamplerState* m_sampler;
+    std::unique_ptr<dw::Shader> m_vs;
+	std::unique_ptr<dw::Shader> m_fs;
+	std::unique_ptr<dw::Program> m_program;
+	std::unique_ptr<dw::UniformBuffer> m_object_ubo;
+    std::unique_ptr<dw::UniformBuffer> m_csm_ubo;
+    std::unique_ptr<dw::UniformBuffer> m_global_ubo;
     
     // CSM shaders.
-    Shader* m_csm_vs;
-    Shader* m_csm_fs;
-    ShaderProgram* m_csm_program;
+    std::unique_ptr<dw::Shader> m_csm_vs;
+    std::unique_ptr<dw::Shader> m_csm_fs;
+    std::unique_ptr<dw::Program> m_csm_program;
 
-    // Rasterizer state for CSM.
-    RasterizerState* m_shadow_map_rs;
+    // Camera.
+    std::unique_ptr<dw::Camera> m_main_camera;
+    std::unique_ptr<dw::Camera> m_debug_camera;
     
-	// Shadow map sampler.
-	SamplerState* m_shadow_sampler;
-
 	// Assets.
 	dw::Mesh* m_plane;
     dw::Mesh* m_suzanne;
-
-	// Camera.
-	dw::Camera* m_main_camera;
-    dw::Camera* m_debug_camera;
 
 	// Uniforms.
 	ObjectUniforms m_plane_transforms;
