@@ -2,314 +2,9 @@
 #include <mesh.h>
 #include <camera.h>
 #include <material.h>
+#include <algorithm>
 #include <memory>
 #include "csm.h"
-
-// Embedded vertex shader source.
-const char* g_sample_vs_src = R"(
-
-layout (location = 0) in vec3 VS_IN_Position;
-layout (location = 1) in vec2 VS_IN_TexCoord;
-layout (location = 2) in vec3 VS_IN_Normal;
-layout (location = 3) in vec3 VS_IN_Tangent;
-layout (location = 4) in vec3 VS_IN_Bitangent;
-
-layout(std430, binding = 0) buffer GlobalUniforms
-{
-    mat4 view;
-    mat4 projection;
-    mat4 crop[8];
-};
-
-layout (std140) uniform ObjectUniforms //#binding 1
-{
-    mat4 model;
-};
-
-out vec3 PS_IN_WorldFragPos;
-out vec4 PS_IN_NDCFragPos;
-out vec3 PS_IN_Normal;
-out vec2 PS_IN_TexCoord;
-
-void main()
-{
-    vec4 position = model * vec4(VS_IN_Position, 1.0);
-	PS_IN_WorldFragPos = position.xyz;
-	PS_IN_Normal = mat3(model) * VS_IN_Normal;
-	PS_IN_TexCoord = VS_IN_TexCoord;
-    PS_IN_NDCFragPos = projection * view * position;
-    gl_Position = PS_IN_NDCFragPos;
-}
-
-)";
-
-const char* g_csm_vs_src = R"(
-
-layout (location = 0) in vec3 VS_IN_Position;
-layout (location = 1) in vec2 VS_IN_TexCoord;
-layout (location = 2) in vec3 VS_IN_Normal;
-layout (location = 3) in vec3 VS_IN_Tangent;
-layout (location = 4) in vec3 VS_IN_Bitangent;
-
-layout(std430, binding = 0) buffer GlobalUniforms
-{
-    mat4 view;
-    mat4 projection;
-    mat4 crop[8];
-};
-
-layout (std140) uniform ObjectUniforms //#binding 1
-{
-    mat4 model;
-};
-
-uniform int u_CascadeIndex;
-
-void main()
-{
-    gl_Position = crop[u_CascadeIndex] * model * vec4(VS_IN_Position, 1.0);
-}
-
-)";
-
-const char* g_depth_prepass_vs_src = R"(
-
-layout (location = 0) in vec3 VS_IN_Position;
-layout (location = 1) in vec2 VS_IN_TexCoord;
-layout (location = 2) in vec3 VS_IN_Normal;
-layout (location = 3) in vec3 VS_IN_Tangent;
-layout (location = 4) in vec3 VS_IN_Bitangent;
-
-layout(std430, binding = 0) buffer GlobalUniforms 
-{
-    mat4 view;
-    mat4 projection;
-    mat4 crop[8];
-};
-
-layout (std140) uniform ObjectUniforms //#binding 1
-{
-    mat4 model;
-};
-
-void main()
-{
-    gl_Position = projection * view * model * vec4(VS_IN_Position, 1.0);
-}
-
-)";
-
-// Embedded fragment shader source.
-const char* g_sample_fs_src = R"(
-
-out vec4 PS_OUT_Color;
-
-in vec3 PS_IN_WorldFragPos;
-in vec4 PS_IN_NDCFragPos;
-in vec3 PS_IN_Normal;
-in vec2 PS_IN_TexCoord;
-
-layout(std140, binding = 2) buffer CSMUniforms
-{
-    vec4 direction;
-    vec4 options;
-    int num_cascades;
-    float far_bounds[8];
-    mat4 texture_matrices[8];
-};
-
-uniform sampler2D s_Diffuse; //#slot 0
-uniform sampler2DArray s_ShadowMap; //#slot 1
-
-float depth_compare(float a, float b, float bias)
-{
-    return a - bias > b ? 1.0 : 0.0;
-}
-
-float shadow_occlussion(float frag_depth, vec3 n, vec3 l)
-{
-	int index = 0;
-    float blend = 0.0;
-    
-	// Find shadow cascade.
-	for (int i = 0; i < num_cascades - 1; i++)
-	{
-		if (frag_depth > far_bounds[i])
-			index = i + 1;
-	}
-
-	blend = clamp( (frag_depth - far_bounds[index] * 0.995) * 200.0, 0.0, 1.0);
-    
-    // Apply blend options.
-    blend *= options.z;
-
-	// Transform frag position into Light-space.
-	vec4 light_space_pos = texture_matrices[index] * vec4(PS_IN_WorldFragPos, 1.0f);
-
-	float current_depth = light_space_pos.z;
-    
-	float bias = max(0.0005 * (1.0 - dot(n, l)), 0.0005);  
-
-	float shadow = 0.0;
-	vec2 texelSize = 1.0 / textureSize(s_ShadowMap, 0).xy;
-	for(int x = -1; x <= 1; ++x)
-	{
-	    for(int y = -1; y <= 1; ++y)
-	    {
-	        float pcfDepth = texture(s_ShadowMap, vec3(light_space_pos.xy + vec2(x, y) * texelSize, float(index))).r; 
-	        shadow += current_depth - bias > pcfDepth ? 1.0 : 0.0;        
-	    }    
-	}
-	shadow /= 9.0;
-	
-    if (options.x == 1.0)
-    {
-        //if (blend > 0.0 && index != num_cascades - 1)
-        //{
-        //    light_space_pos = texture_matrices[index + 1] * vec4(PS_IN_WorldFragPos, 1.0f);
-        //    shadow_map_depth = texture(s_ShadowMap, vec3(light_space_pos.xy, float(index + 1))).r;
-        //    current_depth = light_space_pos.z;
-        //    float next_shadow = depth_compare(current_depth, shadow_map_depth, bias);
-        //    
-        //    return (1.0 - blend) * shadow + blend * next_shadow;
-        //}
-        //else
-			return shadow;
-    }
-    else
-        return 0.0;
-}
-
-vec3 debug_color(float frag_depth)
-{
-	int index = 0;
-
-	// Find shadow cascade.
-	for (int i = 0; i < num_cascades - 1; i++)
-	{
-		if (frag_depth > far_bounds[i])
-			index = i + 1;
-	}
-
-	if (index == 0)
-		return vec3(1.0, 0.0, 0.0);
-	else if (index == 1)
-		return vec3(0.0, 1.0, 0.0);
-	else if (index == 2)
-		return vec3(0.0, 0.0, 1.0);
-	else
-		return vec3(1.0, 1.0, 0.0);
-}
-
-void main()
-{
-	vec3 n = normalize(PS_IN_Normal);
-	vec3 l = -direction.xyz;
-
-	float lambert = max(0.0f, dot(n, l));
-
-	vec3 diffuse = vec3(0.7);// texture(s_Diffuse, PS_IN_TexCoord * 50).xyz;
-	vec3 ambient = diffuse * 0.3;
-
-	float frag_depth = (PS_IN_NDCFragPos.z / PS_IN_NDCFragPos.w) * 0.5 + 0.5;
-	float shadow = shadow_occlussion(frag_depth, n, l);
-	
-    vec3 cascade = options.y == 1.0 ? debug_color(frag_depth) : vec3(0.0);
-	vec3 color = (1.0 - shadow) * diffuse * lambert + ambient + cascade * 0.5;
-
-    PS_OUT_Color = vec4(color, 1.0);
-}
-
-)";
-
-const char* g_csm_fs_src = R"(
-
-void main()
-{
-}
-
-)";
-
-const char* g_post_process_vs_src = R"(
-
-out vec2 PS_IN_TexCoord;
-
-void main()
-{
-    PS_IN_TexCoord = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
-	gl_Position = vec4(PS_IN_TexCoord * 2.0f + -1.0f, 0.0f, 1.0f);
-}
-
-)";
-
-const char* g_depth_reduction_fs_src = R"(
-
-// ------------------------------------------------------------------
-// OUTPUTS ----------------------------------------------------------
-// ------------------------------------------------------------------
-
-out vec2 PS_OUT_Color;
-
-// ------------------------------------------------------------------
-// INPUTS -----------------------------------------------------------
-// ------------------------------------------------------------------
-
-in vec2 PS_IN_TexCoord;
-
-// ------------------------------------------------------------------
-// UNIFORMS ---------------------------------------------------------
-// ------------------------------------------------------------------
-
-uniform sampler2D s_Texture;
-
-// ------------------------------------------------------------------
-// MAIN -------------------------------------------------------------
-// ------------------------------------------------------------------
-
-void main()
-{
-	vec4 depth_x = textureGather(s_Texture, PS_IN_TexCoord, 0);
-    vec4 depth_y = textureGather(s_Texture, PS_IN_TexCoord, 1);
-
-	PS_OUT_Color = vec2(min(min(depth_x.x, depth_x.y), min(depth_x.z, depth_x.w)), max(max(depth_y.x, depth_y.y), max(depth_y.z, depth_y.w)));
-}
-
-// ------------------------------------------------------------------
-
-)";
-
-const char* g_depth_copy_src = R"(
-
-// ------------------------------------------------------------------
-// OUTPUTS ----------------------------------------------------------
-// ------------------------------------------------------------------
-
-out vec2 PS_OUT_Color;
-
-// ------------------------------------------------------------------
-// INPUTS -----------------------------------------------------------
-// ------------------------------------------------------------------
-
-in vec2 PS_IN_TexCoord;
-
-// ------------------------------------------------------------------
-// UNIFORMS ---------------------------------------------------------
-// ------------------------------------------------------------------
-
-uniform sampler2D s_Texture;
-
-// ------------------------------------------------------------------
-// MAIN -------------------------------------------------------------
-// ------------------------------------------------------------------
-
-void main()
-{
-	PS_OUT_Color = texture(s_Texture, PS_IN_TexCoord).xx;
-}
-
-// ------------------------------------------------------------------
-
-)";
 
 // Uniform buffer data structure.
 struct ObjectUniforms
@@ -469,15 +164,18 @@ protected:
 
 		m_depth_prepass_fbo->attach_depth_stencil_target(m_depth_prepass_rt.get(), 0, 0);
 
-		uint32_t w = m_width;
-		uint32_t h = m_height;
-		uint32_t count = 0;
+		int32_t w = m_width;
+		int32_t h = m_height;
+		int32_t count = 0;
 
-		while (w > 1 && h > 1)
+		while (!(w == 1 && h == 1))
 		{
 			count++;
 			w /= 2;
 			h /= 2;
+
+			w = std::max(w, 1);
+			h = std::max(h, 1);
 		}
 
 		m_depth_reduction_fbos.resize(count + 1);
@@ -578,8 +276,8 @@ private:
 	bool create_shaders()
 	{
 		// Create general shaders
-        m_vs = std::make_unique<dw::Shader>(GL_VERTEX_SHADER, g_sample_vs_src);
-		m_fs = std::make_unique<dw::Shader>(GL_FRAGMENT_SHADER, g_sample_fs_src);
+        m_vs = std::unique_ptr<dw::Shader>(dw::Shader::create_from_file(GL_VERTEX_SHADER, "shader/scene_vs.glsl"));
+		m_fs = std::unique_ptr<dw::Shader>(dw::Shader::create_from_file(GL_FRAGMENT_SHADER, "shader/scene_fs.glsl"));
 
 		if (!m_vs || !m_fs)
 		{
@@ -600,8 +298,8 @@ private:
         m_program->uniform_block_binding("ObjectUniforms", 1);
         
         // Create CSM shaders
-        m_csm_vs = std::make_unique<dw::Shader>(GL_VERTEX_SHADER, g_csm_vs_src);
-        m_csm_fs = std::make_unique<dw::Shader>(GL_FRAGMENT_SHADER, g_csm_fs_src);
+        m_csm_vs = std::unique_ptr<dw::Shader>(dw::Shader::create_from_file(GL_VERTEX_SHADER, "shader/shadow_map_vs.glsl"));
+        m_csm_fs = std::unique_ptr<dw::Shader>(dw::Shader::create_from_file(GL_FRAGMENT_SHADER, "shader/empty_fs.glsl"));
         
         if (!m_csm_vs || !m_csm_fs)
         {
@@ -622,8 +320,8 @@ private:
         m_csm_program->uniform_block_binding("ObjectUniforms", 1);
 
 		// Create depth prepass shaders
-		m_depth_prepass_vs = std::make_unique<dw::Shader>(GL_VERTEX_SHADER, g_depth_prepass_vs_src);
-		m_depth_prepass_fs = std::make_unique<dw::Shader>(GL_FRAGMENT_SHADER, g_csm_fs_src);
+		m_depth_prepass_vs = std::unique_ptr<dw::Shader>(dw::Shader::create_from_file(GL_VERTEX_SHADER, "shader/depth_prepass_vs.glsl"));
+		m_depth_prepass_fs = std::unique_ptr<dw::Shader>(dw::Shader::create_from_file(GL_FRAGMENT_SHADER, "shader/empty_fs.glsl"));
 
 		if (!m_depth_prepass_vs || !m_depth_prepass_fs)
 		{
@@ -644,8 +342,8 @@ private:
 		m_depth_prepass_program->uniform_block_binding("ObjectUniforms", 1);
 
 		// Create depth copy shaders
-		m_depth_copy_vs = std::make_unique<dw::Shader>(GL_VERTEX_SHADER, g_post_process_vs_src);
-		m_depth_copy_fs = std::make_unique<dw::Shader>(GL_FRAGMENT_SHADER, g_depth_copy_src);
+		m_depth_copy_vs = std::unique_ptr<dw::Shader>(dw::Shader::create_from_file(GL_VERTEX_SHADER, "shader/fullscreen_vs.glsl"));
+		m_depth_copy_fs = std::unique_ptr<dw::Shader>(dw::Shader::create_from_file(GL_FRAGMENT_SHADER, "shader/copy_fs.glsl"));
 
 		if (!m_depth_copy_vs || !m_depth_copy_fs)
 		{
@@ -664,8 +362,8 @@ private:
 		}
 
 		// Create depth reduction shaders
-		m_depth_reduction_vs = std::make_unique<dw::Shader>(GL_VERTEX_SHADER, g_post_process_vs_src);
-		m_depth_reduction_fs = std::make_unique<dw::Shader>(GL_FRAGMENT_SHADER, g_depth_reduction_fs_src);
+		m_depth_reduction_vs = std::unique_ptr<dw::Shader>(dw::Shader::create_from_file(GL_VERTEX_SHADER, "shader/fullscreen_vs.glsl"));
+		m_depth_reduction_fs = std::unique_ptr<dw::Shader>(dw::Shader::create_from_file(GL_FRAGMENT_SHADER, "shader/depth_reduction_fs.glsl"));
 
 		if (!m_depth_reduction_vs || !m_depth_reduction_fs)
 		{
@@ -840,9 +538,11 @@ private:
 		for (uint32_t i = 1; i < m_depth_reduction_fbos.size(); i++)
 		{
 			float scale = pow(2, i);
+			int w = m_width / scale;
+			int h = m_height / scale;
 
 			m_depth_reduction_fbos[i]->bind();
-			glViewport(0, 0, m_width / scale, m_height / scale);
+			glViewport(0, 0, w, h);
 			
 			glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
