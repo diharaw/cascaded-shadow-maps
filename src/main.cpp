@@ -29,11 +29,11 @@ struct FarBound
 
 struct CSMUniforms
 {
+	DW_ALIGNED(16) glm::mat4 texture_matrices[8];
     DW_ALIGNED(16) glm::vec4 direction;
     DW_ALIGNED(16) glm::vec4 options; // x: shadows enabled, y: show cascades, z: blend enabled
     DW_ALIGNED(16) int       num_cascades;
     DW_ALIGNED(16) FarBound  far_bounds[8];
-    DW_ALIGNED(16) glm::mat4 texture_matrices[8];
 };
 
 #define CAMERA_FAR_PLANE 1000.0f
@@ -79,7 +79,8 @@ protected:
         update_camera();
         
         // Update CSM.
-        m_csm.update(m_main_camera.get(), m_csm_uniforms.direction);
+		if (!m_ssdm)
+			m_csm.update(m_main_camera.get(), m_csm_uniforms.direction);
     
 		// Update transforms.
         update_transforms(m_debug_mode ? m_debug_camera.get() : m_main_camera.get());
@@ -99,6 +100,7 @@ protected:
 
 			depth_reduction();
 
+			setup_cascades_sdsm();
 		}
 
         // Render debug view.
@@ -183,7 +185,6 @@ protected:
 
 		m_depth_reduction_rt = std::make_unique<dw::Texture2D>(m_width, m_height, 1, count, 1, GL_RG32F, GL_RG, GL_FLOAT);
 		m_depth_reduction_rt->generate_mipmaps();
-		m_depth_reduction_rt->set_min_filter(GL_LINEAR);
 		m_depth_reduction_rt->set_wrapping(GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE);
 
 		for (int i = 0; i <= count; i++)
@@ -382,6 +383,25 @@ private:
 			return false;
 		}
 
+		// Create setup cascades shader
+		m_setup_shadows_cs = std::unique_ptr<dw::Shader>(dw::Shader::create_from_file(GL_COMPUTE_SHADER, "shader/setup_cascades_cs.glsl"));
+	
+		if (!m_setup_shadows_cs)
+		{
+			DW_LOG_FATAL("Failed to create Setup Cascades Shaders");
+			return false;
+		}
+
+		// Create Depth reduction shader program
+		dw::Shader* setup_shadows_shaders[] = { m_setup_shadows_cs.get() };
+		m_setup_shadows_program = std::make_unique<dw::Program>(1, setup_shadows_shaders);
+
+		if (!m_setup_shadows_program)
+		{
+			DW_LOG_FATAL("Failed to create Setup Cascades Shader Program");
+			return false;
+		}
+
 		return true;
 	}
 
@@ -482,9 +502,6 @@ private:
 
 	void render_depth_prepass()
 	{
-		// Update global uniforms.
-		update_global_uniforms(m_global_uniforms);
-
 		// Bind and set viewport.
 		m_depth_prepass_fbo->bind();
 		glViewport(0, 0, m_width, m_height);
@@ -599,19 +616,24 @@ private:
 	{
 		m_setup_shadows_program->use();
 
-		m_csm.bind_sdsm_uniforms(m_setup_shadows_program.get());
+		m_csm.bind_sdsm_uniforms(m_setup_shadows_program.get(), m_main_camera.get(), m_csm_uniforms.direction);
 
 		m_setup_shadows_program->set_uniform("u_Near", m_main_camera->m_near);
 		m_setup_shadows_program->set_uniform("u_Far", m_main_camera->m_far);
 		m_setup_shadows_program->set_uniform("u_CameraPos", m_main_camera->m_position);
 		m_setup_shadows_program->set_uniform("u_CameraDir", m_main_camera->m_forward);
 		m_setup_shadows_program->set_uniform("u_CameraUp", m_main_camera->m_up);
-		m_setup_shadows_program->set_uniform("u_MaxMip", m_depth_mips);
+		m_setup_shadows_program->set_uniform("u_MaxMip", m_depth_mips - 1);
+
+		if (m_setup_shadows_program->set_uniform("u_Depth", 0))
+			m_depth_reduction_rt->bind(0);
 
 		m_global_ubo->bind_base(0);
 		m_csm_ubo->bind_base(1);
 
 		glDispatchCompute(1, 1, 1);
+
+		glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 	}
 
 	// -----------------------------------------------------------------------------------------------------------------------------------

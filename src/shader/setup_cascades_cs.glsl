@@ -3,7 +3,6 @@
 // ------------------------------------------------------------------
 
 layout (local_size_x = 1, local_size_y = 1) in;
-layout (binding = 0, rgba32f) uniform image2D i_Depth;
 
 // ------------------------------------------------------------------
 // UNIFORMS ---------------------------------------------------------
@@ -18,24 +17,29 @@ layout(std430, binding = 0) buffer GlobalUniforms
 
 layout(std140, binding = 1) buffer CSMUniforms
 {
+	mat4 texture_matrices[8];
     vec4 direction;
     vec4 options;
     int num_cascades;
     float far_bounds[8];
-    mat4 texture_matrices[8];
 };
 
 uniform float u_Near;
 uniform float u_Far;
-uniform float u_Lambda;
-uniform float u_NearOffset;
 uniform vec3 u_CameraPos;
 uniform vec3 u_CameraDir;
 uniform vec3 u_CameraUp;
+uniform int u_MaxMip;
+uniform float u_Lambda;
+uniform float u_NearOffset;
+uniform float u_FOV;
+uniform float u_Ratio;
 uniform mat4 u_Bias;
 uniform mat4 u_ModelView;
-uniform int u_MaxMip;
 uniform int u_StablePSSM;
+uniform int u_ShadowMapSize;
+
+uniform sampler2D u_Depth;
 
 // ------------------------------------------------------------------
 // STRUCTURES -------------------------------------------------------
@@ -65,13 +69,13 @@ mat4 proj_matrices[MAX_FRUSTUM_SPLITS];
 // FUNCTIONS --------------------------------------------------------
 // ------------------------------------------------------------------
 
-mat4 lookat(vec3 _eye, vec3 _origin, vec3 _up)
+mat4 look_at(vec3 _eye, vec3 _origin, vec3 _up)
 {
 	vec3 front = normalize(_origin - _eye);
 	vec3 right = normalize(cross(front, _up));
 	vec3 up = normalize(cross(right, front));
 
-	mat4 m;
+	mat4 m = mat4(1.0);
 
 	m[0][0] = right.x;
 	m[1][0] = right.y;
@@ -96,11 +100,11 @@ mat4 lookat(vec3 _eye, vec3 _origin, vec3 _up)
 
 mat4 ortho(float _l, float _r, float _b, float _t, float _n, float _f)
 {
-	mat4 m;
+	mat4 m = mat4(1.0);
 
 	m[0][0] = 2.0 / (_r - _l);
 	m[1][1] = 2.0 / (_t - _b);
-	m[3][3] = -2.0 / (_f - _n);
+	m[2][2] = -2.0 / (_f - _n);
 
 	m[3][0] = -(_r + _l) / (_r - _l);
 	m[3][1] = -(_t + _b) / (_t - _b);
@@ -153,21 +157,21 @@ float depth_exp_to_linear_01(float near, float far, float depth)
 
 void update_splits()
 {
-    // vec2 min_max = textureLod(i_Depth, vec2(0.0), u_MaxMip);
+    vec2 min_max = textureLod(u_Depth, vec2(0.0), u_MaxMip).xy;
 
-	// float nd = depth_exp_to_view(min_max.x);
-	// float fd = depth_exp_to_view(min_max.y);
+	// float nd = depth_exp_to_view(u_Near, u_Far, min_max.x) - 0.1;
+	float fd = depth_exp_to_view(u_Near, u_Far, min_max.y) + 1.0;
 
 	float nd = u_Near;
-	float fd = 200.0f;
+	// float fd = 200.0;
 
 	float lambda = u_Lambda;
 	float ratio = fd / nd;
-	split[0].near_plane = nd;
+	splits[0].near_plane = nd;
 
 	for (int i = 1; i < num_cascades; i++)
 	{
-		float si = i / (float)num_cascades;
+		float si = i / float(num_cascades);
 
 		// Practical Split Scheme: https://developer.nvidia.com/gpugems/GPUGems3/gpugems3_ch10.html
 		float t_near = lambda * (nd * pow(ratio, si)) + (1 - lambda) * (nd + (fd - nd) * si);
@@ -225,7 +229,7 @@ void update_texture_matrices()
 void update_far_bounds()
 {
     // for every active split
-    for(int i = 0 ; i < num_cascades ; i++)
+    for(int i = 0 ; i < num_cascades; i++)
     {
         // f[i].fard is originally in eye space - tell's us how far we can see.
         // Here we compute it in camera homogeneous coordinates. Basically, we calculate
@@ -234,7 +238,7 @@ void update_far_bounds()
 		vec4 pos = projection * vec4(0.0, 0.0, -splits[i].far_plane, 1.0);
 		vec4 ndc = pos / pos.w;
 
-        far_bounds[i] = ndc.z * 0.5f + 0.5f;
+        far_bounds[i] = ndc.z * 0.5 + 0.5;
     }
 }
 
@@ -244,8 +248,8 @@ void update_crop_matrices()
 
 	for (int i = 0; i < num_cascades; i++) 
 	{
-		vec3 tmax(-kINFINITY, -kINFINITY, -kINFINITY);
-		vec3 tmin(kINFINITY, kINFINITY, kINFINITY);
+		vec3 tmax = vec3(-kINFINITY, -kINFINITY, -kINFINITY);
+		vec3 tmin = vec3(kINFINITY, kINFINITY, kINFINITY);
 
 		// find the z-range of the current frustum as seen from the light
 		// in order to increase precision
@@ -253,16 +257,22 @@ void update_crop_matrices()
 		// note that only the z-component is need and thus
 		// the multiplication can be simplified
 		// transf.z = shad_modelview[2] * f.point[0].x + shad_modelview[6] * f.point[0].y + shad_modelview[10] * f.point[0].z + shad_modelview[14];
-		vec4 t_transf = u_ModelView * vec4(splits[i].corners[0], 1.0f);
+		vec4 t_transf = u_ModelView * vec4(splits[i].corners[0], 1.0);
 
 		tmin.z = t_transf.z;
 		tmax.z = t_transf.z;
 
 		for (int j = 1; j < 8; j++) 
 		{
-			t_transf = u_ModelView * vec4(splits[i].corners[j], 1.0f);
-			if (t_transf.z > tmax.z) { tmax.z = t_transf.z; }
-			if (t_transf.z < tmin.z) { tmin.z = t_transf.z; }
+			t_transf = u_ModelView * vec4(splits[i].corners[j], 1.0);
+			if (t_transf.z > tmax.z) 
+			{ 
+				tmax.z = t_transf.z; 
+			}
+			if (t_transf.z < tmin.z) 
+			{ 
+				tmin.z = t_transf.z; 
+			}
 		}
 
 		//tmax.z += 50; // TODO: This solves the dissapearing shadow problem. but how to fix?
@@ -278,7 +288,7 @@ void update_crop_matrices()
 		if (u_StablePSSM == 1)
 		{
 			// Calculate bounding sphere radius
-			float radius = 0.0f;
+			float radius = 0.0;
 
 			for (int j = 0; j < 8; j++)
 			{
@@ -308,11 +318,11 @@ void update_crop_matrices()
 
 			vec4 shadow_origin = vec4(0.0, 0.0, 0.0, 1.0);
 			shadow_origin = crop[i] * shadow_origin;
-			shadow_origin = shadow_origin * (m_shadow_map_size / 2.0);
+			shadow_origin = shadow_origin * (u_ShadowMapSize / 2.0);
 
 			vec4 rounded_origin = round(shadow_origin);
 			vec4 round_offset = rounded_origin - shadow_origin;
-			round_offset = round_offset * (2.0 / m_shadow_map_size);
+			round_offset = round_offset * (2.0 / u_ShadowMapSize);
 			round_offset.z = 0.0;
 			round_offset.w = 0.0;
 
@@ -333,7 +343,7 @@ void update_crop_matrices()
 			// find the extends of the frustum slice as projected in light's homogeneous coordinates
 			for (int j = 0; j < 8; j++)
 			{
-				t_transf = t_shad_mvp * vec4(splits[i].corners[j], 1.0f);
+				t_transf = t_shad_mvp * vec4(splits[i].corners[j], 1.0);
 
 				t_transf.x /= t_transf.w;
 				t_transf.y /= t_transf.w;
@@ -361,6 +371,7 @@ void update_crop_matrices()
 			crop[i] = t_projection * u_ModelView;
 		}
 	}
+}
 
 // ------------------------------------------------------------------
 // MAIN -------------------------------------------------------------
@@ -368,6 +379,12 @@ void update_crop_matrices()
 
 void main()
 {
+	for (int i = 0; i < num_cascades; i++)
+	{
+		splits[i].fov = u_FOV;
+		splits[i].ratio = u_Ratio;
+	}
+
 	update_splits();
 	update_frustum_corners();
 	update_crop_matrices();

@@ -19,11 +19,11 @@ in vec2 PS_IN_TexCoord;
 
 layout(std140, binding = 2) buffer CSMUniforms
 {
+	mat4 texture_matrices[8];
     vec4 direction;
     vec4 options;
     int num_cascades;
     float far_bounds[8];
-    mat4 texture_matrices[8];
 };
 
 uniform sampler2D s_Diffuse;

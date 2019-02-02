@@ -108,7 +108,7 @@ void CSM::update(dw::Camera* camera, glm::vec3 dir)
 void CSM::update_splits(dw::Camera* camera)
 {
 	float nd = camera->m_near;
-	float fd = 200.0f;// camera->m_far;
+	float fd = camera->m_far;
 
 	float lambda = m_lambda;
 	float ratio = fd / nd;
@@ -207,6 +207,9 @@ void CSM::bind_sdsm_uniforms(dw::Program* program, dw::Camera* camera, glm::vec3
 	program->set_uniform("u_NearOffset", m_near_offset);
 	program->set_uniform("u_Bias", m_bias);
 	program->set_uniform("u_ModelView", m_light_view);
+	program->set_uniform("u_FOV", m_splits[0].fov);
+	program->set_uniform("u_Ratio", m_splits[0].ratio);
+	program->set_uniform("u_ShadowMapSize", m_shadow_map_size);
 	program->set_uniform("u_StablePSSM", (int)m_stable_pssm);
 }
 
