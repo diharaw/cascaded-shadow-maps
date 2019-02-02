@@ -178,6 +178,7 @@ protected:
 			h = std::max(h, 1);
 		}
 
+		m_depth_mips = count;
 		m_depth_reduction_fbos.resize(count + 1);
 
 		m_depth_reduction_rt = std::make_unique<dw::Texture2D>(m_width, m_height, 1, count, 1, GL_RG32F, GL_RG, GL_FLOAT);
@@ -594,6 +595,27 @@ private:
 
 	// -----------------------------------------------------------------------------------------------------------------------------------
 
+	void setup_cascades_sdsm()
+	{
+		m_setup_shadows_program->use();
+
+		m_csm.bind_sdsm_uniforms(m_setup_shadows_program.get());
+
+		m_setup_shadows_program->set_uniform("u_Near", m_main_camera->m_near);
+		m_setup_shadows_program->set_uniform("u_Far", m_main_camera->m_far);
+		m_setup_shadows_program->set_uniform("u_CameraPos", m_main_camera->m_position);
+		m_setup_shadows_program->set_uniform("u_CameraDir", m_main_camera->m_forward);
+		m_setup_shadows_program->set_uniform("u_CameraUp", m_main_camera->m_up);
+		m_setup_shadows_program->set_uniform("u_MaxMip", m_depth_mips);
+
+		m_global_ubo->bind_base(0);
+		m_csm_ubo->bind_base(1);
+
+		glDispatchCompute(1, 1, 1);
+	}
+
+	// -----------------------------------------------------------------------------------------------------------------------------------
+
 	void update_object_uniforms(const ObjectUniforms& transform)
 	{
         void* ptr = m_object_ubo->map(GL_WRITE_ONLY);
@@ -847,6 +869,7 @@ private:
     float m_camera_speed = 0.1f;
 
 	// Default shadow options.
+	int m_depth_mips = 0;
 	bool m_ssdm = false;
 	int m_shadow_map_size = 2048;
 	int m_cascade_count = 4;

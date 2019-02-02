@@ -188,6 +188,28 @@ void CSM::update_far_bounds(dw::Camera* camera)
     }
 }
 
+void CSM::bind_sdsm_uniforms(dw::Program* program, dw::Camera* camera, glm::vec3 dir)
+{
+	dir = glm::normalize(dir);
+	m_light_direction = dir;
+
+	glm::vec3 center = camera->m_position + camera->m_forward * 50.0f;
+	glm::vec3 light_pos = center - dir * ((camera->m_far - camera->m_near) / 2.0f);
+	glm::vec3 right = glm::cross(dir, glm::vec3(0.0f, 1.0f, 0.0f));
+
+	glm::vec3 up = m_stable_pssm ? camera->m_up : camera->m_right;
+
+	glm::mat4 modelview = glm::lookAt(light_pos, center, up);
+
+	m_light_view = modelview;
+
+	program->set_uniform("u_Lambda", m_lambda);
+	program->set_uniform("u_NearOffset", m_near_offset);
+	program->set_uniform("u_Bias", m_bias);
+	program->set_uniform("u_ModelView", m_light_view);
+	program->set_uniform("u_StablePSSM", (int)m_stable_pssm);
+}
+
 void CSM::update_crop_matrices(glm::mat4 t_modelview, dw::Camera* camera)
 {
 	glm::mat4 t_projection;
