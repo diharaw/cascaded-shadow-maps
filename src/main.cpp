@@ -14,7 +14,7 @@ layout (location = 2) in vec3 VS_IN_Normal;
 layout (location = 3) in vec3 VS_IN_Tangent;
 layout (location = 4) in vec3 VS_IN_Bitangent;
 
-layout (std140) uniform GlobalUniforms //#binding 0
+layout(std430, binding = 0) buffer GlobalUniforms
 {
     mat4 view;
     mat4 projection;
@@ -51,7 +51,7 @@ layout (location = 2) in vec3 VS_IN_Normal;
 layout (location = 3) in vec3 VS_IN_Tangent;
 layout (location = 4) in vec3 VS_IN_Bitangent;
 
-layout (std140) uniform GlobalUniforms //#binding 0
+layout(std430, binding = 0) buffer GlobalUniforms
 {
     mat4 view;
     mat4 projection;
@@ -78,7 +78,7 @@ layout (location = 2) in vec3 VS_IN_Normal;
 layout (location = 3) in vec3 VS_IN_Tangent;
 layout (location = 4) in vec3 VS_IN_Bitangent;
 
-layout (std140) uniform GlobalUniforms //#binding 0
+layout(std430, binding = 0) buffer GlobalUniforms 
 {
     mat4 view;
     mat4 projection;
@@ -393,12 +393,16 @@ protected:
 		// Update CSM uniforms.
 		update_csm_uniforms(m_csm_uniforms);
 
-		// Render depth prepass
-		render_depth_prepass();
+		if (m_ssdm)
+		{
+			// Render depth prepass
+			render_depth_prepass();
 
-		copy_depth();
+			copy_depth();
 
-		depth_reduction();
+			depth_reduction();
+
+		}
 
         // Render debug view.
         render_debug_view();
@@ -426,6 +430,19 @@ protected:
 		// Unload assets.
 		dw::Mesh::unload(m_plane);
         dw::Mesh::unload(m_suzanne);
+	}
+
+	// -----------------------------------------------------------------------------------------------------------------------------------
+
+	dw::AppSettings intial_app_settings()
+	{
+		dw::AppSettings settings;
+
+		settings.width = 1280;
+		settings.height = 720;
+		settings.title = "Cascaded Shadow Maps";
+
+		return settings;
 	}
 
 	// -----------------------------------------------------------------------------------------------------------------------------------
@@ -578,7 +595,6 @@ private:
 			return false;
 		}
         
-        m_program->uniform_block_binding("GlobalUniforms", 0);
         m_program->uniform_block_binding("ObjectUniforms", 1);
         m_program->uniform_block_binding("CSMUniforms", 2);
         
@@ -602,7 +618,6 @@ private:
             return false;
         }
         
-        m_csm_program->uniform_block_binding("GlobalUniforms", 0);
         m_csm_program->uniform_block_binding("ObjectUniforms", 1);
 
 		// Create depth prepass shaders
@@ -625,7 +640,6 @@ private:
 			return false;
 		}
 
-		m_depth_prepass_program->uniform_block_binding("GlobalUniforms", 0);
 		m_depth_prepass_program->uniform_block_binding("ObjectUniforms", 1);
 
 		// Create depth copy shaders
@@ -734,7 +748,7 @@ private:
         m_object_ubo = std::make_unique<dw::UniformBuffer>(GL_DYNAMIC_DRAW, sizeof(ObjectUniforms));
         
         // Create uniform buffer for global data
-        m_global_ubo = std::make_unique<dw::UniformBuffer>(GL_DYNAMIC_DRAW, sizeof(GlobalUniforms));
+        m_global_ubo = std::make_unique<dw::ShaderStorageBuffer>(GL_DYNAMIC_DRAW, sizeof(GlobalUniforms));
         
         // Create uniform buffer for CSM data
         m_csm_ubo = std::make_unique<dw::UniformBuffer>(GL_DYNAMIC_DRAW, sizeof(CSMUniforms));
@@ -1007,8 +1021,8 @@ private:
         if (m_mouse_look)
         {
             // Activate Mouse Look
-            current->set_rotatation_delta(glm::vec3((float)(m_mouse_delta_y * m_camera_sensitivity * m_delta),
-                                                    (float)(m_mouse_delta_x * m_camera_sensitivity * m_delta),
+            current->set_rotatation_delta(glm::vec3((float)(m_mouse_delta_y * m_camera_sensitivity),
+                                                    (float)(m_mouse_delta_x * m_camera_sensitivity),
                                                     (float)(0.0f)));
         }
         else
@@ -1039,6 +1053,7 @@ private:
             ImGui::Checkbox("Blending", &blend);
             m_csm_uniforms.options.z = blend;
 
+			ImGui::Checkbox("Sample Distribution Shadow Maps", &m_ssdm);
 			ImGui::Checkbox("Stable", &m_csm.m_stable_pssm);
             ImGui::Checkbox("Debug Camera", &m_debug_mode);
             ImGui::Checkbox("Show Frustum Splits", &m_show_frustum_splits);
@@ -1135,7 +1150,7 @@ private:
 	std::unique_ptr<dw::Program> m_program;
 	std::unique_ptr<dw::UniformBuffer> m_object_ubo;
     std::unique_ptr<dw::UniformBuffer> m_csm_ubo;
-    std::unique_ptr<dw::UniformBuffer> m_global_ubo;
+    std::unique_ptr<dw::ShaderStorageBuffer> m_global_ubo;
     
     // CSM shaders.
     std::unique_ptr<dw::Shader> m_csm_vs;
@@ -1181,10 +1196,11 @@ private:
     bool m_debug_mode = false;
     float m_heading_speed = 0.0f;
     float m_sideways_speed = 0.0f;
-    float m_camera_sensitivity = 0.005f;
+    float m_camera_sensitivity = 0.05f;
     float m_camera_speed = 0.1f;
 
 	// Default shadow options.
+	bool m_ssdm = false;
 	int m_shadow_map_size = 2048;
 	int m_cascade_count = 4;
 	float m_pssm_lambda = 0.3;
