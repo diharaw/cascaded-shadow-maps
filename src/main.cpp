@@ -107,7 +107,7 @@ in vec4 PS_IN_NDCFragPos;
 in vec3 PS_IN_Normal;
 in vec2 PS_IN_TexCoord;
 
-layout (std140) uniform CSMUniforms //#binding 2
+layout(std140, binding = 2) buffer CSMUniforms
 {
     vec4 direction;
     vec4 options;
@@ -596,7 +596,6 @@ private:
 		}
         
         m_program->uniform_block_binding("ObjectUniforms", 1);
-        m_program->uniform_block_binding("CSMUniforms", 2);
         
         // Create CSM shaders
         m_csm_vs = std::make_unique<dw::Shader>(GL_VERTEX_SHADER, g_csm_vs_src);
@@ -687,61 +686,6 @@ private:
 
 	// -----------------------------------------------------------------------------------------------------------------------------------
 
-//    bool create_states()
-//    {
-//        // Create rasterizer state
-//        RasterizerStateCreateDesc rs_desc;
-//        DW_ZERO_MEMORY(rs_desc);
-//        rs_desc.cull_mode = CullMode::BACK;
-//        rs_desc.fill_mode = FillMode::SOLID;
-//        rs_desc.front_winding_ccw = true;
-//        rs_desc.multisample = true;
-//        rs_desc.scissor = false;
-//
-//        m_rs = m_device.create_rasterizer_state(rs_desc);
-//
-//        // Create second rasterizer state with front-face culling for shadow mapping.
-//        rs_desc.cull_mode = CullMode::FRONT;
-//
-//        m_shadow_map_rs = m_device.create_rasterizer_state(rs_desc);
-//
-//        // Create depth stencil state
-//        DepthStencilStateCreateDesc ds_desc;
-//        DW_ZERO_MEMORY(ds_desc);
-//        ds_desc.depth_mask = true;
-//        ds_desc.enable_depth_test = true;
-//        ds_desc.enable_stencil_test = false;
-//        ds_desc.depth_cmp_func = ComparisonFunction::LESS_EQUAL;
-//
-//        m_ds = m_device.create_depth_stencil_state(ds_desc);
-//
-//        // Create sampler state.
-//        SamplerStateCreateDesc ss_desc;
-//        DW_ZERO_MEMORY(ss_desc);
-//        ss_desc.min_filter = TextureFilteringMode::ANISOTROPIC_ALL;
-//        ss_desc.mag_filter = TextureFilteringMode::ANISOTROPIC_ALL;
-//        ss_desc.max_anisotropy = 16;
-//        ss_desc.wrap_mode_u = TextureWrapMode::REPEAT;
-//        ss_desc.wrap_mode_v = TextureWrapMode::REPEAT;
-//        ss_desc.wrap_mode_w = TextureWrapMode::REPEAT;
-//
-//        m_sampler = m_device.create_sampler_state(ss_desc);
-//
-//        // Sampler state for Shadow map.
-//        ss_desc.min_filter = TextureFilteringMode::NEAREST;
-//        ss_desc.mag_filter = TextureFilteringMode::NEAREST;
-//        ss_desc.max_anisotropy = 0;
-//        ss_desc.wrap_mode_u = TextureWrapMode::CLAMP_TO_EDGE;
-//        ss_desc.wrap_mode_v = TextureWrapMode::CLAMP_TO_EDGE;
-//        ss_desc.wrap_mode_w = TextureWrapMode::CLAMP_TO_EDGE;
-//
-//        m_shadow_sampler = m_device.create_sampler_state(ss_desc);
-//
-//        return true;
-//    }
-
-	// -----------------------------------------------------------------------------------------------------------------------------------
-
 	bool create_uniform_buffer()
 	{
 		// Create uniform buffer for object matrix data
@@ -751,7 +695,7 @@ private:
         m_global_ubo = std::make_unique<dw::ShaderStorageBuffer>(GL_DYNAMIC_DRAW, sizeof(GlobalUniforms));
         
         // Create uniform buffer for CSM data
-        m_csm_ubo = std::make_unique<dw::UniformBuffer>(GL_DYNAMIC_DRAW, sizeof(CSMUniforms));
+        m_csm_ubo = std::make_unique<dw::ShaderStorageBuffer>(GL_DYNAMIC_DRAW, sizeof(CSMUniforms));
 
 		return true;
 	}
@@ -1149,7 +1093,7 @@ private:
 	std::unique_ptr<dw::Shader> m_fs;
 	std::unique_ptr<dw::Program> m_program;
 	std::unique_ptr<dw::UniformBuffer> m_object_ubo;
-    std::unique_ptr<dw::UniformBuffer> m_csm_ubo;
+    std::unique_ptr<dw::ShaderStorageBuffer> m_csm_ubo;
     std::unique_ptr<dw::ShaderStorageBuffer> m_global_ubo;
     
     // CSM shaders.
@@ -1178,6 +1122,9 @@ private:
 	std::unique_ptr<dw::Texture2D> m_depth_reduction_rt;
 	std::vector<std::unique_ptr<dw::Framebuffer>> m_depth_reduction_fbos;
     
+	std::unique_ptr<dw::Shader> m_setup_shadows_cs;
+	std::unique_ptr<dw::Program> m_setup_shadows_program;
+
 	// Assets.
 	dw::Mesh* m_plane;
     dw::Mesh* m_suzanne;
