@@ -70,6 +70,33 @@ void main()
 
 )";
 
+const char* g_depth_prepass_vs_src = R"(
+
+layout (location = 0) in vec3 VS_IN_Position;
+layout (location = 1) in vec2 VS_IN_TexCoord;
+layout (location = 2) in vec3 VS_IN_Normal;
+layout (location = 3) in vec3 VS_IN_Tangent;
+layout (location = 4) in vec3 VS_IN_Bitangent;
+
+layout (std140) uniform GlobalUniforms //#binding 0
+{
+    mat4 view;
+    mat4 projection;
+    mat4 crop;
+};
+
+layout (std140) uniform ObjectUniforms //#binding 1
+{
+    mat4 model;
+};
+
+void main()
+{
+    gl_Position = projection * view * model * vec4(VS_IN_Position, 1.0);
+}
+
+)";
+
 // Embedded fragment shader source.
 const char* g_sample_fs_src = R"(
 
@@ -201,6 +228,87 @@ void main()
 
 )";
 
+const char* g_post_process_vs_src = R"(
+
+out vec2 PS_IN_TexCoord;
+
+void main()
+{
+    PS_IN_TexCoord = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+	gl_Position = vec4(PS_IN_TexCoord * 2.0f + -1.0f, 0.0f, 1.0f);
+}
+
+)";
+
+const char* g_depth_reduction_fs_src = R"(
+
+// ------------------------------------------------------------------
+// OUTPUTS ----------------------------------------------------------
+// ------------------------------------------------------------------
+
+out vec2 PS_OUT_Color;
+
+// ------------------------------------------------------------------
+// INPUTS -----------------------------------------------------------
+// ------------------------------------------------------------------
+
+in vec2 PS_IN_TexCoord;
+
+// ------------------------------------------------------------------
+// UNIFORMS ---------------------------------------------------------
+// ------------------------------------------------------------------
+
+uniform sampler2D s_Texture;
+
+// ------------------------------------------------------------------
+// MAIN -------------------------------------------------------------
+// ------------------------------------------------------------------
+
+void main()
+{
+	vec4 depth_x = textureGather(s_Texture, PS_IN_TexCoord, 0);
+    vec4 depth_y = textureGather(s_Texture, PS_IN_TexCoord, 1);
+
+	PS_OUT_Color = vec2(min(min(depth_x.x, depth_x.y), min(depth_x.z, depth_x.w)), max(max(depth_y.x, depth_y.y), max(depth_y.z, depth_y.w)));
+}
+
+// ------------------------------------------------------------------
+
+)";
+
+const char* g_depth_copy_src = R"(
+
+// ------------------------------------------------------------------
+// OUTPUTS ----------------------------------------------------------
+// ------------------------------------------------------------------
+
+out vec2 PS_OUT_Color;
+
+// ------------------------------------------------------------------
+// INPUTS -----------------------------------------------------------
+// ------------------------------------------------------------------
+
+in vec2 PS_IN_TexCoord;
+
+// ------------------------------------------------------------------
+// UNIFORMS ---------------------------------------------------------
+// ------------------------------------------------------------------
+
+uniform sampler2D s_Texture;
+
+// ------------------------------------------------------------------
+// MAIN -------------------------------------------------------------
+// ------------------------------------------------------------------
+
+void main()
+{
+	PS_OUT_Color = texture(s_Texture, PS_IN_TexCoord).xx;
+}
+
+// ------------------------------------------------------------------
+
+)";
+
 // Uniform buffer data structure.
 struct ObjectUniforms
 {
@@ -248,6 +356,8 @@ protected:
 		if (!create_uniform_buffer())
 			return false;
 
+		create_framebuffers();
+
 		// Load mesh.
 		if (!load_mesh())
 			return false;
@@ -257,7 +367,7 @@ protected:
 
 		// Initial CSM.
 		initialize_csm();
-
+		
 		return true;
 	}
 
@@ -277,6 +387,19 @@ protected:
 		// Update transforms.
         update_transforms(m_debug_mode ? m_debug_camera.get() : m_main_camera.get());
 
+		// Update global uniforms.
+		update_global_uniforms(m_global_uniforms);
+
+		// Update CSM uniforms.
+		update_csm_uniforms(m_csm_uniforms);
+
+		// Render depth prepass
+		render_depth_prepass();
+
+		copy_depth();
+
+		depth_reduction();
+
         // Render debug view.
         render_debug_view();
         
@@ -294,12 +417,62 @@ protected:
 
 	void shutdown() override
 	{
+		m_depth_prepass_fbo.reset();
+		m_depth_prepass_rt.reset();
+
 		// Cleanup CSM.
 		m_csm.shutdown();
         
 		// Unload assets.
 		dw::Mesh::unload(m_plane);
         dw::Mesh::unload(m_suzanne);
+	}
+
+	// -----------------------------------------------------------------------------------------------------------------------------------
+
+	void create_framebuffers()
+	{
+		for (auto& fbo : m_depth_reduction_fbos)
+			fbo.reset();
+
+		m_depth_reduction_fbos.clear();
+
+		m_depth_reduction_rt.reset();
+
+		m_depth_prepass_fbo.reset();
+		m_depth_prepass_rt.reset();
+
+		m_depth_prepass_rt = std::make_unique<dw::Texture2D>(m_width, m_height, 1, 1, 1, GL_DEPTH_COMPONENT32F, GL_DEPTH_COMPONENT, GL_FLOAT);
+		m_depth_prepass_rt->set_min_filter(GL_LINEAR);
+		m_depth_prepass_rt->set_wrapping(GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE);
+		
+		m_depth_prepass_fbo = std::make_unique<dw::Framebuffer>();
+
+		m_depth_prepass_fbo->attach_depth_stencil_target(m_depth_prepass_rt.get(), 0, 0);
+
+		uint32_t w = m_width;
+		uint32_t h = m_height;
+		uint32_t count = 0;
+
+		while (w > 1 && h > 1)
+		{
+			count++;
+			w /= 2;
+			h /= 2;
+		}
+
+		m_depth_reduction_fbos.resize(count + 1);
+
+		m_depth_reduction_rt = std::make_unique<dw::Texture2D>(m_width, m_height, 1, count, 1, GL_RG32F, GL_RG, GL_FLOAT);
+		m_depth_reduction_rt->generate_mipmaps();
+		m_depth_reduction_rt->set_min_filter(GL_LINEAR);
+		m_depth_reduction_rt->set_wrapping(GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE);
+
+		for (int i = 0; i <= count; i++)
+		{
+			m_depth_reduction_fbos[i] = std::make_unique<dw::Framebuffer>();
+			m_depth_reduction_fbos[i]->attach_render_target(0, m_depth_reduction_rt.get(), 0, i);
+		}
 	}
 
 	// -----------------------------------------------------------------------------------------------------------------------------------
@@ -312,6 +485,8 @@ protected:
 
 		// Re-initialize CSM to fit new frustum shape.
 		initialize_csm();
+
+		create_framebuffers();
 	}
 
 	// -----------------------------------------------------------------------------------------------------------------------------------
@@ -429,6 +604,69 @@ private:
         
         m_csm_program->uniform_block_binding("GlobalUniforms", 0);
         m_csm_program->uniform_block_binding("ObjectUniforms", 1);
+
+		// Create depth prepass shaders
+		m_depth_prepass_vs = std::make_unique<dw::Shader>(GL_VERTEX_SHADER, g_depth_prepass_vs_src);
+		m_depth_prepass_fs = std::make_unique<dw::Shader>(GL_FRAGMENT_SHADER, g_csm_fs_src);
+
+		if (!m_depth_prepass_vs || !m_depth_prepass_fs)
+		{
+			DW_LOG_FATAL("Failed to create Depth Prepass Shaders");
+			return false;
+		}
+
+		// Create Depth prepass shader program
+		dw::Shader* depth_prepass_shaders[] = { m_depth_prepass_vs.get(), m_depth_prepass_fs.get() };
+		m_depth_prepass_program = std::make_unique<dw::Program>(2, depth_prepass_shaders);
+
+		if (!m_depth_prepass_program)
+		{
+			DW_LOG_FATAL("Failed to create Depth Prepass Shader Program");
+			return false;
+		}
+
+		m_depth_prepass_program->uniform_block_binding("GlobalUniforms", 0);
+		m_depth_prepass_program->uniform_block_binding("ObjectUniforms", 1);
+
+		// Create depth copy shaders
+		m_depth_copy_vs = std::make_unique<dw::Shader>(GL_VERTEX_SHADER, g_post_process_vs_src);
+		m_depth_copy_fs = std::make_unique<dw::Shader>(GL_FRAGMENT_SHADER, g_depth_copy_src);
+
+		if (!m_depth_copy_vs || !m_depth_copy_fs)
+		{
+			DW_LOG_FATAL("Failed to create Depth Copy Shaders");
+			return false;
+		}
+
+		// Create Depth copy shader program
+		dw::Shader* depth_copy_shaders[] = { m_depth_copy_vs.get(), m_depth_copy_fs.get() };
+		m_depth_copy_program = std::make_unique<dw::Program>(2, depth_copy_shaders);
+
+		if (!m_depth_copy_program)
+		{
+			DW_LOG_FATAL("Failed to create Depth Copy Shader Program");
+			return false;
+		}
+
+		// Create depth reduction shaders
+		m_depth_reduction_vs = std::make_unique<dw::Shader>(GL_VERTEX_SHADER, g_post_process_vs_src);
+		m_depth_reduction_fs = std::make_unique<dw::Shader>(GL_FRAGMENT_SHADER, g_depth_reduction_fs_src);
+
+		if (!m_depth_reduction_vs || !m_depth_reduction_fs)
+		{
+			DW_LOG_FATAL("Failed to create Depth Reduction Shaders");
+			return false;
+		}
+
+		// Create Depth reduction shader program
+		dw::Shader* depth_reduction_shaders[] = { m_depth_reduction_vs.get(), m_depth_reduction_fs.get() };
+		m_depth_reduction_program = std::make_unique<dw::Program>(2, depth_reduction_shaders);
+
+		if (!m_depth_reduction_program)
+		{
+			DW_LOG_FATAL("Failed to create Depth Reduction Shader Program");
+			return false;
+		}
 
 		return true;
 	}
@@ -552,12 +790,6 @@ private:
     
     void render_scene()
     {
-        // Update global uniforms.
-        update_global_uniforms(m_global_uniforms);
-        
-        // Update CSM uniforms.
-        update_csm_uniforms(m_csm_uniforms);
-        
         // Bind and set viewport.
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         glViewport(0, 0, m_width, m_height);
@@ -586,7 +818,88 @@ private:
         //render_mesh(m_plane, m_plane_transforms);
         render_mesh(m_suzanne, m_suzanne_transforms, false);
     }
+
+	// -----------------------------------------------------------------------------------------------------------------------------------
+
+	void render_depth_prepass()
+	{
+		// Update global uniforms.
+		update_global_uniforms(m_global_uniforms);
+
+		// Bind and set viewport.
+		m_depth_prepass_fbo->bind();
+		glViewport(0, 0, m_width, m_height);
+
+		// Clear default framebuffer.
+		glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+		// Bind states.
+		glEnable(GL_DEPTH_TEST);
+		glEnable(GL_CULL_FACE);
+		glCullFace(GL_BACK);
+
+		// Bind shader program.
+		m_depth_prepass_program->use();
+
+		// Draw meshes.
+		//render_mesh(m_plane, m_plane_transforms);
+		render_mesh(m_suzanne, m_suzanne_transforms, false);
+	}
+
+	// -----------------------------------------------------------------------------------------------------------------------------------
     
+	void copy_depth()
+	{
+		glDisable(GL_DEPTH_TEST);
+		glDisable(GL_CULL_FACE);
+
+		m_depth_copy_program->use();
+
+		m_depth_reduction_fbos[0]->bind();
+		glViewport(0, 0, m_width, m_height);
+
+		glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+		m_depth_copy_program->set_uniform("s_Texture", 0);
+		m_depth_prepass_rt->bind(0);
+
+		glDrawArrays(GL_TRIANGLES, 0, 3);
+	}
+
+	// -----------------------------------------------------------------------------------------------------------------------------------
+
+	void depth_reduction()
+	{
+		glDisable(GL_DEPTH_TEST);
+		glDisable(GL_CULL_FACE);
+
+		m_depth_reduction_program->use();
+
+		for (uint32_t i = 1; i < m_depth_reduction_fbos.size(); i++)
+		{
+			float scale = pow(2, i);
+
+			m_depth_reduction_fbos[i]->bind();
+			glViewport(0, 0, m_width / scale, m_height / scale);
+			
+			glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+			m_depth_reduction_program->set_uniform("s_Texture", 0);
+			m_depth_reduction_rt->bind(0);
+
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, i - 1);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, i - 1);
+
+			glDrawArrays(GL_TRIANGLES, 0, 3);
+		}
+
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 1000);
+	}
+
     // -----------------------------------------------------------------------------------------------------------------------------------
     
     void render_shadow_map()
@@ -832,6 +1145,23 @@ private:
     // Camera.
     std::unique_ptr<dw::Camera> m_main_camera;
     std::unique_ptr<dw::Camera> m_debug_camera;
+
+	// Depth Pre-pass
+	std::unique_ptr<dw::Shader> m_depth_prepass_vs;
+	std::unique_ptr<dw::Shader> m_depth_prepass_fs;
+	std::unique_ptr<dw::Program> m_depth_prepass_program;
+	std::unique_ptr<dw::Texture2D> m_depth_prepass_rt;
+	std::unique_ptr<dw::Framebuffer> m_depth_prepass_fbo;
+
+	std::unique_ptr<dw::Shader> m_depth_copy_vs;
+	std::unique_ptr<dw::Shader> m_depth_copy_fs;
+	std::unique_ptr<dw::Program> m_depth_copy_program;
+
+	std::unique_ptr<dw::Shader> m_depth_reduction_vs;
+	std::unique_ptr<dw::Shader> m_depth_reduction_fs;
+	std::unique_ptr<dw::Program> m_depth_reduction_program;
+	std::unique_ptr<dw::Texture2D> m_depth_reduction_rt;
+	std::vector<std::unique_ptr<dw::Framebuffer>> m_depth_reduction_fbos;
     
 	// Assets.
 	dw::Mesh* m_plane;
