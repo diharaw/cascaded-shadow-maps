@@ -18,7 +18,7 @@ layout(std430, binding = 0) buffer GlobalUniforms
 {
     mat4 view;
     mat4 projection;
-    mat4 crop;
+    mat4 crop[8];
 };
 
 layout (std140) uniform ObjectUniforms //#binding 1
@@ -55,7 +55,7 @@ layout(std430, binding = 0) buffer GlobalUniforms
 {
     mat4 view;
     mat4 projection;
-    mat4 crop;
+    mat4 crop[8];
 };
 
 layout (std140) uniform ObjectUniforms //#binding 1
@@ -63,9 +63,11 @@ layout (std140) uniform ObjectUniforms //#binding 1
     mat4 model;
 };
 
+uniform int u_CascadeIndex;
+
 void main()
 {
-    gl_Position = crop * model * vec4(VS_IN_Position, 1.0);
+    gl_Position = crop[u_CascadeIndex] * model * vec4(VS_IN_Position, 1.0);
 }
 
 )";
@@ -82,7 +84,7 @@ layout(std430, binding = 0) buffer GlobalUniforms
 {
     mat4 view;
     mat4 projection;
-    mat4 crop;
+    mat4 crop[8];
 };
 
 layout (std140) uniform ObjectUniforms //#binding 1
@@ -319,7 +321,7 @@ struct GlobalUniforms
 {
     DW_ALIGNED(16) glm::mat4 view;
     DW_ALIGNED(16) glm::mat4 projection;
-    DW_ALIGNED(16) glm::mat4 crop;
+    DW_ALIGNED(16) glm::mat4 crop[8];
 };
 
 // Structure containing frustum split far-bound.
@@ -872,11 +874,8 @@ private:
         
         for (int i = 0; i < m_csm.frustum_split_count(); i++)
         {
-            // Update global uniforms.
-			m_global_uniforms.crop = m_csm.split_view_proj(i);
-            
-            update_global_uniforms(m_global_uniforms);
-            
+			m_csm_program->set_uniform("u_CascadeIndex", i);
+
             // Bind and set viewport.
             m_csm.framebuffers()[i]->bind();
             glViewport(0, 0, m_csm.shadow_map_size(), m_csm.shadow_map_size());
@@ -935,6 +934,7 @@ private:
         {
             m_csm_uniforms.far_bounds[i].far_bound = m_csm.far_bound(i);
             m_csm_uniforms.texture_matrices[i] = m_csm.texture_matrix(i);
+			m_global_uniforms.crop[i] = m_csm.split_view_proj(i);
         }
         
         // Update plane transforms.
