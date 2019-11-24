@@ -6,6 +6,8 @@
 #include <memory>
 #include "csm.h"
 
+#undef max
+
 // Uniform buffer data structure.
 struct ObjectUniforms
 {
