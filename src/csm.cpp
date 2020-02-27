@@ -39,14 +39,14 @@ void CSM::initialize(float lambda, float near_offset, int split_count, int shado
         }
 	}
 
-    m_shadow_maps = new dw::Texture2D(m_shadow_map_size, m_shadow_map_size, m_split_count, 1, 1, GL_DEPTH_COMPONENT32F, GL_DEPTH_COMPONENT, GL_FLOAT);
+    m_shadow_maps = new dw::gl::Texture2D(m_shadow_map_size, m_shadow_map_size, m_split_count, 1, 1, GL_DEPTH_COMPONENT32F, GL_DEPTH_COMPONENT, GL_FLOAT);
     m_shadow_maps->set_min_filter(GL_NEAREST);
     m_shadow_maps->set_mag_filter(GL_NEAREST);
     m_shadow_maps->set_wrapping(GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE);
     
 	for (int i = 0; i < m_split_count; i++)
 	{
-        m_shadow_fbos[i] = new dw::Framebuffer();
+        m_shadow_fbos[i] = new dw::gl::Framebuffer();
         m_shadow_fbos[i]->attach_depth_stencil_target(m_shadow_maps, i, 0);
 	}
 
@@ -188,7 +188,7 @@ void CSM::update_far_bounds(dw::Camera* camera)
     }
 }
 
-void CSM::bind_sdsm_uniforms(dw::Program* program, dw::Camera* camera, glm::vec3 dir)
+void CSM::bind_sdsm_uniforms(dw::gl::Program* program, dw::Camera* camera, glm::vec3 dir)
 {
 	dir = glm::normalize(dir);
 	m_light_direction = dir;

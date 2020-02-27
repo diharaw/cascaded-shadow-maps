@@ -19,8 +19,8 @@ struct FrustumSplit
 
 struct CSM
 {
-    dw::Texture2D* m_shadow_maps = nullptr;
-	dw::Framebuffer* m_shadow_fbos[MAX_FRUSTUM_SPLITS];
+    dw::gl::Texture2D* m_shadow_maps = nullptr;
+	dw::gl::Framebuffer* m_shadow_fbos[MAX_FRUSTUM_SPLITS];
 	float m_lambda;
 	float m_near_offset;
 	int   m_split_count;
@@ -45,14 +45,14 @@ struct CSM
 	void update_crop_matrices(glm::mat4 t_modelview, dw::Camera* camera);
     void update_texture_matrices(dw::Camera* camera);
     void update_far_bounds(dw::Camera* camera);
-	void bind_sdsm_uniforms(dw::Program* program, dw::Camera* camera, glm::vec3 dir);
+	void bind_sdsm_uniforms(dw::gl::Program* program, dw::Camera* camera, glm::vec3 dir);
 
     inline FrustumSplit* frustum_splits() { return &m_splits[0]; }
     inline glm::mat4 split_view_proj(int i) { return m_crop_matrices[i]; }
     inline glm::mat4 texture_matrix(int i) { return m_texture_matrices[i]; }
     inline float far_bound(int i) { return m_far_bounds[i]; }
-	inline dw::Texture2D* shadow_map() { return m_shadow_maps; }
-	inline dw::Framebuffer** framebuffers() { return &m_shadow_fbos[0]; }
+	inline dw::gl::Texture2D* shadow_map() { return m_shadow_maps; }
+	inline dw::gl::Framebuffer** framebuffers() { return &m_shadow_fbos[0]; }
 	inline uint32_t frustum_split_count() { return m_split_count; }
 	inline uint32_t near_offset() { return m_near_offset; }
 	inline uint32_t lambda() { return m_lambda; }

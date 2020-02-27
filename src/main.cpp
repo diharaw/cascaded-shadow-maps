@@ -4,8 +4,10 @@
 #include <material.h>
 #include <algorithm>
 #include <memory>
+#include <ogl.h>
 #include "csm.h"
 
+#undef min
 #undef max
 
 // Uniform buffer data structure.
@@ -39,6 +41,277 @@ struct CSMUniforms
 };
 
 #define CAMERA_FAR_PLANE 1000.0f
+#define CSM_MAX_CASCADES 32
+
+enum CSMSplitMethod
+{
+    CSM_SPLIT_MANUAL,
+    CSM_SPLIT_PSSM,
+    CSM_SPLIT_LOGARITHMIC
+};
+
+struct CSMDesc
+{
+    // Clip plane distances of the main camera
+    float near_clip;
+    float far_clip;
+    // Min-Max distances of the cascades [0.0 - 1.0]
+    float min_distance;
+    float max_distance;
+    int num_cascades;
+    int shadow_map_size;
+    int filter_size;
+    CSMSplitMethod split_method;
+    float pssm_lambda;
+    glm::vec3 light_dir;
+    bool stablize_cascades;
+    float split_ratios[CSM_MAX_CASCADES];
+    float cascade_splits[CSM_MAX_CASCADES];
+    glm::vec4 cascade_scales[CSM_MAX_CASCADES];
+    glm::vec4 cascade_offsets[CSM_MAX_CASCADES];
+};
+
+glm::mat4 make_shadow_matrix(glm::mat4 inverse_vp, glm::vec3 cam_up_dir, glm::vec3 light_dir, bool stablize_cascades)
+{
+    // Get the 8 points of the view frustum in world space
+    glm::vec4 frustum_corners[8] =
+    {
+        glm::vec4(-1.0f,  1.0f, -1.0f, 1.0f),
+        glm::vec4(1.0f,  1.0f, -1.0f, 1.0f),
+        glm::vec4(1.0f, -1.0f, -1.0f, 1.0f),
+        glm::vec4(-1.0f, -1.0f, -1.0f, 1.0f),
+        glm::vec4(-1.0f,  1.0f, 1.0f, 1.0f),
+        glm::vec4(1.0f,  1.0f, 1.0f, 1.0f),
+        glm::vec4(1.0f, -1.0f, 1.0f, 1.0f),
+        glm::vec4(-1.0f, -1.0f, 1.0f, 1.0f),
+    };
+
+    glm::vec3 frustum_center = glm::vec3(0.0f);
+
+    for (int i = 0; i < 8; i++)
+    {
+        glm::vec4 c = inverse_vp * frustum_corners[i];
+        frustum_corners[i] = c / frustum_corners[i].w;
+
+        frustum_center += frustum_corners[i];
+    }
+
+    frustum_center /= 8.0f;
+
+    glm::vec3 up_dir = cam_up_dir;
+
+    if (stablize_cascades)
+        up_dir = glm::vec3(0.0f, 1.0f, 1.0f);
+
+    // Get position of the shadow camera
+    glm::vec3 shadow_camera_pos = frustum_center + light_dir * -0.5f;
+
+    // Create shadow matrix
+    glm::mat4 shadow_view = glm::lookAt(shadow_camera_pos, frustum_center, up_dir);
+    glm::mat4 shadow_proj = glm::ortho(-0.5f, -0.5f, 0.5f, 0.5f, 0.0f, 1.0f);
+
+    // Create bias matrix
+    glm::mat4 tex_scale_bias = glm::mat4(1.0f);
+    tex_scale_bias = glm::scale(tex_scale_bias, glm::vec3(0.5f, 0.5f, 1.0f));
+    tex_scale_bias = glm::translate(tex_scale_bias, glm::vec3(0.5f, 0.5f, 0.0f));
+
+    return tex_scale_bias * shadow_proj * shadow_view;
+}
+
+void generate_cascade_data(dw::Camera* camera, CSMDesc& desc)
+{
+    float min_distance = desc.min_distance;
+    float max_distance = desc.max_distance;
+
+    float shadow_map_size = static_cast<float>(desc.shadow_map_size);
+
+    float cascade_splits[CSM_MAX_CASCADES];
+
+    if (desc.split_method == CSM_SPLIT_MANUAL)
+    {
+        for (int i = 0; i < desc.num_cascades; i++)
+            cascade_splits[i] = min_distance + desc.split_ratios[i] * max_distance;
+    }
+    else if (desc.split_method == CSM_SPLIT_PSSM || desc.split_method == CSM_SPLIT_LOGARITHMIC)
+    {
+        float lambda = 1.0f;
+
+        if (desc.split_method == CSM_SPLIT_PSSM)
+            lambda = desc.pssm_lambda;
+
+        float clip_range = desc.near_clip - desc.far_clip;
+        float min_z = desc.near_clip + min_distance * clip_range;
+        float max_z = desc.near_clip + max_distance * clip_range;
+        float range = max_z - min_z;
+        float ratio = max_z / min_z;
+
+        for (int i = 0; i < desc.num_cascades; i++)
+        {
+            float p = (i + 1) / static_cast<float>(desc.num_cascades);
+            float log = min_z * pow(ratio, p);
+            float uniform = min_z + range * p;
+            float d = lambda * (log - uniform) + uniform;
+            cascade_splits[i] = (d - desc.near_clip) / clip_range;
+        }
+
+        glm::mat4 global_shadow_matrix = make_shadow_matrix(glm::inverse(camera->m_view_projection), camera->m_up, desc.light_dir, desc.stablize_cascades);
+        glm::mat4 inv_view_proj = glm::inverse(camera->m_view_projection);
+
+        for (int cascade_idx = 0; cascade_idx < desc.num_cascades; cascade_idx++)
+        {
+            glm::vec3 frustum_corners[8] =
+            {
+                glm::vec3(-1.0f,  1.0f, -1.0f),
+                glm::vec3(1.0f,  1.0f, -1.0f),
+                glm::vec3(1.0f, -1.0f, -1.0f),
+                glm::vec3(-1.0f, -1.0f, -1.0f),
+                glm::vec3(-1.0f,  1.0f, 1.0f),
+                glm::vec3(1.0f,  1.0f, 1.0f),
+                glm::vec3(1.0f, -1.0f, 1.0f),
+                glm::vec3(-1.0f, -1.0f, 1.0f),
+            };
+
+            float prev_split_dist = cascade_idx == 0 ? desc.min_distance : cascade_splits[cascade_idx - 1];
+            float split_dist = cascade_splits[cascade_idx];
+
+            for (uint32_t i = 0; i < 8; ++i)
+                frustum_corners[i] = glm::vec3(inv_view_proj * glm::vec4(frustum_corners[i], 1.0f));
+
+                // Get the corners of the current cascade slice of the view frustum
+                for (uint32_t i = 0; i < 4; ++i)
+                {
+                    glm::vec3 corner_ray = frustum_corners[i + 4] - frustum_corners[i];
+                    glm::vec3 near_corner_ray = corner_ray * prev_split_dist;
+                    glm::vec3 far_corner_ray = corner_ray * split_dist;
+                    frustum_corners[i + 4] = frustum_corners[i] + far_corner_ray;
+                    frustum_corners[i] = frustum_corners[i] + near_corner_ray;
+                }
+
+                // Calculate the centroid of the view frustum slice
+                glm::vec3 frustum_center = glm::vec3(0.0f);
+
+                for (uint32_t i = 0; i < 8; ++i)
+                    frustum_center = frustum_center + frustum_corners[i];
+
+                frustum_center *= 1.0f / 8.0f;
+
+                // Pick the up vector to use for the light camera
+                glm::vec3 up_dir = camera->m_right;
+
+                glm::vec3 min_extents;
+                glm::vec3 max_extents;
+
+                if (desc.stablize_cascades)
+                {
+                    // This needs to be constant for it to be stable
+                    up_dir = glm::vec3(0.0f, 1.0f, 0.0f);
+
+                    // Calculate the radius of a bounding sphere surrounding the frustum corners
+                    float sphere_radius = 0.0f;
+                    for (uint32_t i = 0; i < 8; ++i)
+                    {
+                        float dist = glm::length(glm::vec3(frustum_corners[i]) - frustum_center);
+                        sphere_radius = std::max(sphere_radius, dist);
+                    }
+
+                    sphere_radius = std::ceil(sphere_radius * 16.0f) / 16.0f;
+
+                    max_extents = glm::vec3(sphere_radius, sphere_radius, sphere_radius);
+                    min_extents = -max_extents;
+                }
+                else
+                {
+                    // Create a temporary view matrix for the light
+                    glm::vec3 light_camera_pos = frustum_center;
+                    glm::vec3 look_at = frustum_center - desc.light_dir;
+                    glm::mat4 light_view = glm::lookAt(light_camera_pos, look_at, up_dir);
+
+                    // Calculate an AABB around the frustum corners
+                    glm::vec3 mins = glm::vec3(FLT_MAX);
+                    glm::vec3 maxes = glm::vec3(-FLT_MAX);
+
+                    for (uint32_t i = 0; i < 8; ++i)
+                    {
+                        glm::vec3 corner = glm::vec3(light_view * glm::vec4(frustum_corners[i], 1.0f));
+                        mins = glm::min(mins, corner);
+                        maxes = glm::min(maxes, corner);
+                    }
+
+                    min_extents = mins;
+                    max_extents = maxes;
+
+                    // Adjust the min/max to accommodate the filtering size
+                    float scale = (desc.shadow_map_size + desc.filter_size) / static_cast<float>(desc.shadow_map_size);
+                    min_extents.x *= scale;
+                    min_extents.y *= scale;
+                    max_extents.x *= scale;
+                    max_extents.y *= scale;
+                }
+
+                glm::vec3 cascade_extents = max_extents - min_extents;
+
+                // Get position of the shadow camera
+                glm::vec3 shadow_camera_pos = frustum_center + desc.light_dir * -min_extents.z;
+
+                // Come up with a new orthographic camera for the shadow caster
+                glm::mat4 shadow_proj = glm::ortho(min_extents.x, min_extents.y, max_extents.x, max_extents.y, 0.0f, cascade_extents.z);
+                glm::mat4 shadow_view = glm::lookAt(shadow_camera_pos, frustum_center, up_dir);
+                glm::mat4 shadow_matrix = shadow_proj * shadow_view;
+
+                if (desc.stablize_cascades)
+                {
+                    // Create the rounding matrix, by projecting the world-space origin and determining
+                    // the fractional offset in texel space
+                    glm::vec4 shadow_origin = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+                    shadow_origin = shadow_matrix * shadow_origin;
+                    shadow_origin = shadow_origin * (desc.shadow_map_size / 2.0f);
+
+                    glm::vec4 rounded_origin = glm::round(shadow_origin);
+                    glm::vec4 round_offset = rounded_origin - shadow_origin;
+                    round_offset = round_offset * (2.0f / desc.shadow_map_size);
+                    round_offset.z = 0.0f;
+                    round_offset.w = 0.0f;
+
+                    shadow_proj[3] = shadow_proj[3] + round_offset;
+                }
+
+                // Draw the mesh with depth only, using the new shadow camera
+                // RenderDepthCPU(context, shadowCamera, world, characterWorld, true);
+
+                // Apply the scale/offset matrix, which transforms from [-1,1]
+                // post-projection space to [0,1] UV space
+                glm::mat4 tex_scale_bias;
+                tex_scale_bias[0] = glm::vec4(0.5f, 0.0f, 0.0f, 0.0f);
+                tex_scale_bias[1] = glm::vec4(0.0f, -0.5f, 0.0f, 0.0f);
+                tex_scale_bias[2] = glm::vec4(0.0f, 0.0f, 1.0f, 0.0f);
+                tex_scale_bias[3] = glm::vec4(0.5f, 0.5f, 0.0f, 1.0f);
+
+                shadow_matrix = tex_scale_bias * shadow_matrix;
+
+                // Store the split distance in terms of view space depth
+                const float clip_dist = desc.far_clip - desc.near_clip;
+
+                desc.cascade_splits[cascade_idx] = desc.near_clip + split_dist * clip_dist;
+
+                // Calculate the position of the lower corner of the cascade partition, in the UV space
+                // of the first cascade partition
+                glm::mat4 inv_cascade_mat = glm::inverse(shadow_matrix);
+                glm::vec3 cascade_corner = glm::vec3(inv_cascade_mat * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
+                cascade_corner = global_shadow_matrix * glm::vec4(cascade_corner, 1.0f);
+
+                // Do the same for the upper corner
+                glm::vec3 other_corner = glm::vec3(inv_cascade_mat * glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+                other_corner = glm::vec3(global_shadow_matrix * glm::vec4(other_corner, 1.0f));
+
+                // Calculate the scale and offset
+                glm::vec3 cascade_scale = glm::vec3(1.0f, 1.0f, 1.0f) / (other_corner - cascade_corner);
+
+                desc.cascade_offsets[cascade_idx] = glm::vec4(-cascade_corner, 0.0f);
+                desc.cascade_scales[cascade_idx] = glm::vec4(cascade_scale, 1.0f);
+        }
+    }
+}
+
 
 class Sample : public dw::Application
 {
@@ -49,13 +322,13 @@ protected:
 	bool init(int argc, const char* argv[]) override
 	{
 		// Create GPU resources.
-		if (!create_shaders())
+		/*if (!create_shaders())
 			return false;
 
 		if (!create_uniform_buffer())
 			return false;
 
-		create_framebuffers();
+		create_framebuffers();*/
 
 		// Load mesh.
 		if (!load_mesh())
@@ -65,7 +338,7 @@ protected:
 		create_camera();
 
 		// Initial CSM.
-		initialize_csm();
+		//initialize_csm();
 		
 		return true;
 	}
@@ -75,44 +348,51 @@ protected:
 	void update(double delta) override
 	{
         // Debug GUI
-        debug_gui();
+        //debug_gui();
         
 		// Update camera.
         update_camera();
         
         // Update CSM.
-		if (!m_ssdm)
-			m_csm.update(m_main_camera.get(), m_csm_uniforms.direction);
-    
-		// Update transforms.
-        update_transforms(m_debug_mode ? m_debug_camera.get() : m_main_camera.get());
+		//if (!m_ssdm)
+		//	m_csm.update(m_main_camera.get(), m_csm_uniforms.direction);
+  //  
+		//// Update transforms.
+  //      update_transforms(m_debug_mode ? m_debug_camera.get() : m_main_camera.get());
 
-		// Update global uniforms.
-		update_global_uniforms(m_global_uniforms);
+		//// Update global uniforms.
+		//update_global_uniforms(m_global_uniforms);
 
-		// Update CSM uniforms.
-		update_csm_uniforms(m_csm_uniforms);
+		//// Update CSM uniforms.
+		//update_csm_uniforms(m_csm_uniforms);
 
-		if (m_ssdm)
-		{
-			// Render depth prepass
-			render_depth_prepass();
+		//if (m_ssdm)
+		//{
+		//	// Render depth prepass
+		//	render_depth_prepass();
 
-			copy_depth();
+		//	copy_depth();
 
-			depth_reduction();
+		//	depth_reduction();
 
-			setup_cascades_sdsm();
-		}
+		//	setup_cascades_sdsm();
+		//}
 
-        // Render debug view.
-        render_debug_view();
-        
-        // Render shadow map.
-        render_shadow_map();
-        
-        // Render scene.
-        render_scene();
+  //      // Render debug view.
+  //      render_debug_view();
+  //      
+  //      // Render shadow map.
+  //      render_shadow_map();
+  //      
+  //      // Render scene.
+  //      render_scene();
+
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glViewport(0, 0, m_width, m_height);
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+		if (m_debug_mode)
+			m_debug_draw.frustum(m_main_camera->m_view_projection, glm::vec3(0.0f, 1.0f, 0.0f));
         
         // Render debug draw.
         m_debug_draw.render(nullptr, m_width, m_height, m_debug_mode ? m_debug_camera->m_view_projection : m_main_camera->m_view_projection);
@@ -127,10 +407,6 @@ protected:
 
 		// Cleanup CSM.
 		m_csm.shutdown();
-        
-		// Unload assets.
-		dw::Mesh::unload(m_plane);
-        dw::Mesh::unload(m_suzanne);
 	}
 
 	// -----------------------------------------------------------------------------------------------------------------------------------
@@ -139,8 +415,8 @@ protected:
 	{
 		dw::AppSettings settings;
 
-		settings.width = 1280;
-		settings.height = 720;
+		settings.width = 1920;
+		settings.height = 1080;
 		settings.title = "Cascaded Shadow Maps";
 
 		return settings;
@@ -159,12 +435,12 @@ protected:
 
 		m_depth_prepass_fbo.reset();
 		m_depth_prepass_rt.reset();
-
-		m_depth_prepass_rt = std::make_unique<dw::Texture2D>(m_width, m_height, 1, 1, 1, GL_DEPTH_COMPONENT32F, GL_DEPTH_COMPONENT, GL_FLOAT);
+		
+		m_depth_prepass_rt = std::make_unique<dw::gl::Texture2D>(m_width, m_height, 1, 1, 1, GL_DEPTH_COMPONENT32F, GL_DEPTH_COMPONENT, GL_FLOAT);
 		m_depth_prepass_rt->set_min_filter(GL_LINEAR);
 		m_depth_prepass_rt->set_wrapping(GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE);
 		
-		m_depth_prepass_fbo = std::make_unique<dw::Framebuffer>();
+		m_depth_prepass_fbo = std::make_unique<dw::gl::Framebuffer>();
 
 		m_depth_prepass_fbo->attach_depth_stencil_target(m_depth_prepass_rt.get(), 0, 0);
 
@@ -185,13 +461,13 @@ protected:
 		m_depth_mips = count;
 		m_depth_reduction_fbos.resize(count + 1);
 
-		m_depth_reduction_rt = std::make_unique<dw::Texture2D>(m_width, m_height, 1, count, 1, GL_RG32F, GL_RG, GL_FLOAT);
+		m_depth_reduction_rt = std::make_unique<dw::gl::Texture2D>(m_width, m_height, 1, count, 1, GL_RG32F, GL_RG, GL_FLOAT);
 		m_depth_reduction_rt->generate_mipmaps();
 		m_depth_reduction_rt->set_wrapping(GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE);
 
 		for (int i = 0; i <= count; i++)
 		{
-			m_depth_reduction_fbos[i] = std::make_unique<dw::Framebuffer>();
+			m_depth_reduction_fbos[i] = std::make_unique<dw::gl::Framebuffer>();
 			m_depth_reduction_fbos[i]->attach_render_target(0, m_depth_reduction_rt.get(), 0, i);
 		}
 	}
@@ -225,6 +501,9 @@ protected:
             m_sideways_speed = -m_camera_speed;
         else if(code == GLFW_KEY_D)
             m_sideways_speed = m_camera_speed;
+
+		if (code == GLFW_KEY_G)
+			m_debug_mode = !m_debug_mode;
     }
     
     // -----------------------------------------------------------------------------------------------------------------------------------
@@ -280,8 +559,8 @@ private:
 	bool create_shaders()
 	{
 		// Create general shaders
-        m_vs = std::unique_ptr<dw::Shader>(dw::Shader::create_from_file(GL_VERTEX_SHADER, "shader/scene_vs.glsl"));
-		m_fs = std::unique_ptr<dw::Shader>(dw::Shader::create_from_file(GL_FRAGMENT_SHADER, "shader/scene_fs.glsl"));
+        m_vs = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_VERTEX_SHADER, "shader/scene_vs.glsl"));
+		m_fs = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_FRAGMENT_SHADER, "shader/scene_fs.glsl"));
 
 		if (!m_vs || !m_fs)
 		{
@@ -290,8 +569,8 @@ private:
 		}
 
 		// Create general shader program
-        dw::Shader* shaders[] = { m_vs.get(), m_fs.get() };
-        m_program = std::make_unique<dw::Program>(2, shaders);
+        dw::gl::Shader* shaders[] = { m_vs.get(), m_fs.get() };
+        m_program = std::make_unique<dw::gl::Program>(2, shaders);
 
 		if (!m_program)
 		{
@@ -302,8 +581,8 @@ private:
         m_program->uniform_block_binding("ObjectUniforms", 1);
         
         // Create CSM shaders
-        m_csm_vs = std::unique_ptr<dw::Shader>(dw::Shader::create_from_file(GL_VERTEX_SHADER, "shader/shadow_map_vs.glsl"));
-        m_csm_fs = std::unique_ptr<dw::Shader>(dw::Shader::create_from_file(GL_FRAGMENT_SHADER, "shader/empty_fs.glsl"));
+        m_csm_vs = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_VERTEX_SHADER, "shader/shadow_map_vs.glsl"));
+        m_csm_fs = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_FRAGMENT_SHADER, "shader/empty_fs.glsl"));
         
         if (!m_csm_vs || !m_csm_fs)
         {
@@ -312,8 +591,8 @@ private:
         }
         
         // Create CSM shader program
-        dw::Shader* csm_shaders[] = { m_csm_vs.get(), m_csm_fs.get() };
-        m_csm_program = std::make_unique<dw::Program>(2, csm_shaders);
+        dw::gl::Shader* csm_shaders[] = { m_csm_vs.get(), m_csm_fs.get() };
+        m_csm_program = std::make_unique<dw::gl::Program>(2, csm_shaders);
         
         if (!m_csm_program)
         {
@@ -324,8 +603,8 @@ private:
         m_csm_program->uniform_block_binding("ObjectUniforms", 1);
 
 		// Create depth prepass shaders
-		m_depth_prepass_vs = std::unique_ptr<dw::Shader>(dw::Shader::create_from_file(GL_VERTEX_SHADER, "shader/depth_prepass_vs.glsl"));
-		m_depth_prepass_fs = std::unique_ptr<dw::Shader>(dw::Shader::create_from_file(GL_FRAGMENT_SHADER, "shader/empty_fs.glsl"));
+		m_depth_prepass_vs = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_VERTEX_SHADER, "shader/depth_prepass_vs.glsl"));
+		m_depth_prepass_fs = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_FRAGMENT_SHADER, "shader/empty_fs.glsl"));
 
 		if (!m_depth_prepass_vs || !m_depth_prepass_fs)
 		{
@@ -334,8 +613,8 @@ private:
 		}
 
 		// Create Depth prepass shader program
-		dw::Shader* depth_prepass_shaders[] = { m_depth_prepass_vs.get(), m_depth_prepass_fs.get() };
-		m_depth_prepass_program = std::make_unique<dw::Program>(2, depth_prepass_shaders);
+		dw::gl::Shader* depth_prepass_shaders[] = { m_depth_prepass_vs.get(), m_depth_prepass_fs.get() };
+		m_depth_prepass_program = std::make_unique<dw::gl::Program>(2, depth_prepass_shaders);
 
 		if (!m_depth_prepass_program)
 		{
@@ -346,8 +625,8 @@ private:
 		m_depth_prepass_program->uniform_block_binding("ObjectUniforms", 1);
 
 		// Create depth copy shaders
-		m_depth_copy_vs = std::unique_ptr<dw::Shader>(dw::Shader::create_from_file(GL_VERTEX_SHADER, "shader/fullscreen_vs.glsl"));
-		m_depth_copy_fs = std::unique_ptr<dw::Shader>(dw::Shader::create_from_file(GL_FRAGMENT_SHADER, "shader/copy_fs.glsl"));
+		m_depth_copy_vs = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_VERTEX_SHADER, "shader/fullscreen_vs.glsl"));
+		m_depth_copy_fs = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_FRAGMENT_SHADER, "shader/copy_fs.glsl"));
 
 		if (!m_depth_copy_vs || !m_depth_copy_fs)
 		{
@@ -356,8 +635,8 @@ private:
 		}
 
 		// Create Depth copy shader program
-		dw::Shader* depth_copy_shaders[] = { m_depth_copy_vs.get(), m_depth_copy_fs.get() };
-		m_depth_copy_program = std::make_unique<dw::Program>(2, depth_copy_shaders);
+		dw::gl::Shader* depth_copy_shaders[] = { m_depth_copy_vs.get(), m_depth_copy_fs.get() };
+		m_depth_copy_program = std::make_unique<dw::gl::Program>(2, depth_copy_shaders);
 
 		if (!m_depth_copy_program)
 		{
@@ -366,8 +645,8 @@ private:
 		}
 
 		// Create depth reduction shaders
-		m_depth_reduction_vs = std::unique_ptr<dw::Shader>(dw::Shader::create_from_file(GL_VERTEX_SHADER, "shader/fullscreen_vs.glsl"));
-		m_depth_reduction_fs = std::unique_ptr<dw::Shader>(dw::Shader::create_from_file(GL_FRAGMENT_SHADER, "shader/depth_reduction_fs.glsl"));
+		m_depth_reduction_vs = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_VERTEX_SHADER, "shader/fullscreen_vs.glsl"));
+		m_depth_reduction_fs = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_FRAGMENT_SHADER, "shader/depth_reduction_fs.glsl"));
 
 		if (!m_depth_reduction_vs || !m_depth_reduction_fs)
 		{
@@ -376,8 +655,8 @@ private:
 		}
 
 		// Create Depth reduction shader program
-		dw::Shader* depth_reduction_shaders[] = { m_depth_reduction_vs.get(), m_depth_reduction_fs.get() };
-		m_depth_reduction_program = std::make_unique<dw::Program>(2, depth_reduction_shaders);
+		dw::gl::Shader* depth_reduction_shaders[] = { m_depth_reduction_vs.get(), m_depth_reduction_fs.get() };
+		m_depth_reduction_program = std::make_unique<dw::gl::Program>(2, depth_reduction_shaders);
 
 		if (!m_depth_reduction_program)
 		{
@@ -386,7 +665,7 @@ private:
 		}
 
 		// Create setup cascades shader
-		m_setup_shadows_cs = std::unique_ptr<dw::Shader>(dw::Shader::create_from_file(GL_COMPUTE_SHADER, "shader/setup_cascades_cs.glsl"));
+		m_setup_shadows_cs = std::unique_ptr<dw::gl::Shader>(dw::gl::Shader::create_from_file(GL_COMPUTE_SHADER, "shader/setup_cascades_cs.glsl"));
 	
 		if (!m_setup_shadows_cs)
 		{
@@ -395,8 +674,8 @@ private:
 		}
 
 		// Create Depth reduction shader program
-		dw::Shader* setup_shadows_shaders[] = { m_setup_shadows_cs.get() };
-		m_setup_shadows_program = std::make_unique<dw::Program>(1, setup_shadows_shaders);
+		dw::gl::Shader* setup_shadows_shaders[] = { m_setup_shadows_cs.get() };
+		m_setup_shadows_program = std::make_unique<dw::gl::Program>(1, setup_shadows_shaders);
 
 		if (!m_setup_shadows_program)
 		{
@@ -412,13 +691,13 @@ private:
 	bool create_uniform_buffer()
 	{
 		// Create uniform buffer for object matrix data
-        m_object_ubo = std::make_unique<dw::UniformBuffer>(GL_DYNAMIC_DRAW, sizeof(ObjectUniforms));
+        m_object_ubo = std::make_unique<dw::gl::UniformBuffer>(GL_DYNAMIC_DRAW, sizeof(ObjectUniforms));
         
         // Create uniform buffer for global data
-        m_global_ubo = std::make_unique<dw::ShaderStorageBuffer>(GL_DYNAMIC_DRAW, sizeof(GlobalUniforms));
+        m_global_ubo = std::make_unique<dw::gl::ShaderStorageBuffer>(GL_DYNAMIC_DRAW, sizeof(GlobalUniforms));
         
         // Create uniform buffer for CSM data
-        m_csm_ubo = std::make_unique<dw::ShaderStorageBuffer>(GL_DYNAMIC_DRAW, sizeof(CSMUniforms));
+        m_csm_ubo = std::make_unique<dw::gl::ShaderStorageBuffer>(GL_DYNAMIC_DRAW, sizeof(CSMUniforms));
 
 		return true;
 	}
@@ -442,7 +721,7 @@ private:
 
 	// -----------------------------------------------------------------------------------------------------------------------------------
 
-    void render_mesh(dw::Mesh* mesh, const ObjectUniforms& transforms, bool use_textures = true)
+    void render_mesh(dw::Mesh::Ptr mesh, const ObjectUniforms& transforms, bool use_textures = true)
 	{
         // Copy new data into UBO.
         update_object_uniforms(transforms);
@@ -460,7 +739,7 @@ private:
 
 			// Bind texture.
             if (use_textures)
-                submesh.mat->texture(0)->bind(0);
+				mesh->material(submesh.mat_idx)->texture(0)->bind(0);
 
 			// Issue draw call.
 			glDrawElementsBaseVertex(GL_TRIANGLES, submesh.index_count, GL_UNSIGNED_INT, (void*)(sizeof(unsigned int) * submesh.base_index), submesh.base_vertex);
@@ -835,45 +1114,45 @@ private:
 	float m_clear_color[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
 
 	// General GPU resources.
-    std::unique_ptr<dw::Shader> m_vs;
-	std::unique_ptr<dw::Shader> m_fs;
-	std::unique_ptr<dw::Program> m_program;
-	std::unique_ptr<dw::UniformBuffer> m_object_ubo;
-    std::unique_ptr<dw::ShaderStorageBuffer> m_csm_ubo;
-    std::unique_ptr<dw::ShaderStorageBuffer> m_global_ubo;
+    std::unique_ptr<dw::gl::Shader> m_vs;
+	std::unique_ptr<dw::gl::Shader> m_fs;
+	std::unique_ptr<dw::gl::Program> m_program;
+	std::unique_ptr<dw::gl::UniformBuffer> m_object_ubo;
+    std::unique_ptr<dw::gl::ShaderStorageBuffer> m_csm_ubo;
+    std::unique_ptr<dw::gl::ShaderStorageBuffer> m_global_ubo;
     
     // CSM shaders.
-    std::unique_ptr<dw::Shader> m_csm_vs;
-    std::unique_ptr<dw::Shader> m_csm_fs;
-    std::unique_ptr<dw::Program> m_csm_program;
+    std::unique_ptr<dw::gl::Shader> m_csm_vs;
+    std::unique_ptr<dw::gl::Shader> m_csm_fs;
+    std::unique_ptr<dw::gl::Program> m_csm_program;
 
     // Camera.
     std::unique_ptr<dw::Camera> m_main_camera;
     std::unique_ptr<dw::Camera> m_debug_camera;
 
 	// Depth Pre-pass
-	std::unique_ptr<dw::Shader> m_depth_prepass_vs;
-	std::unique_ptr<dw::Shader> m_depth_prepass_fs;
-	std::unique_ptr<dw::Program> m_depth_prepass_program;
-	std::unique_ptr<dw::Texture2D> m_depth_prepass_rt;
-	std::unique_ptr<dw::Framebuffer> m_depth_prepass_fbo;
+	std::unique_ptr<dw::gl::Shader> m_depth_prepass_vs;
+	std::unique_ptr<dw::gl::Shader> m_depth_prepass_fs;
+	std::unique_ptr<dw::gl::Program> m_depth_prepass_program;
+	std::unique_ptr<dw::gl::Texture2D> m_depth_prepass_rt;
+	std::unique_ptr<dw::gl::Framebuffer> m_depth_prepass_fbo;
 
-	std::unique_ptr<dw::Shader> m_depth_copy_vs;
-	std::unique_ptr<dw::Shader> m_depth_copy_fs;
-	std::unique_ptr<dw::Program> m_depth_copy_program;
+	std::unique_ptr<dw::gl::Shader> m_depth_copy_vs;
+	std::unique_ptr<dw::gl::Shader> m_depth_copy_fs;
+	std::unique_ptr<dw::gl::Program> m_depth_copy_program;
 
-	std::unique_ptr<dw::Shader> m_depth_reduction_vs;
-	std::unique_ptr<dw::Shader> m_depth_reduction_fs;
-	std::unique_ptr<dw::Program> m_depth_reduction_program;
-	std::unique_ptr<dw::Texture2D> m_depth_reduction_rt;
-	std::vector<std::unique_ptr<dw::Framebuffer>> m_depth_reduction_fbos;
+	std::unique_ptr<dw::gl::Shader> m_depth_reduction_vs;
+	std::unique_ptr<dw::gl::Shader> m_depth_reduction_fs;
+	std::unique_ptr<dw::gl::Program> m_depth_reduction_program;
+	std::unique_ptr<dw::gl::Texture2D> m_depth_reduction_rt;
+	std::vector<std::unique_ptr<dw::gl::Framebuffer>> m_depth_reduction_fbos;
     
-	std::unique_ptr<dw::Shader> m_setup_shadows_cs;
-	std::unique_ptr<dw::Program> m_setup_shadows_program;
+	std::unique_ptr<dw::gl::Shader> m_setup_shadows_cs;
+	std::unique_ptr<dw::gl::Program> m_setup_shadows_program;
 
 	// Assets.
-	dw::Mesh* m_plane;
-    dw::Mesh* m_suzanne;
+	dw::Mesh::Ptr m_plane;
+    dw::Mesh::Ptr m_suzanne;
 
 	// Uniforms.
 	ObjectUniforms m_plane_transforms;
